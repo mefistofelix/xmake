@@ -1,6 +1,31 @@
 set_project("xmake-lazy-toolchain-patch-tests")
 
-add_toolchaindirs("toolchains")
+toolchain("good")
+    set_kind("standalone")
+    set_runtimes("patch-static-runtime")
+    on_check(function (toolchain)
+        assert(toolchain:get("patch.prepared", {load = false}),
+            "on_toolchain_prepare did not run before check")
+        toolchain:config_set("patch.checked", true)
+        return true
+    end)
+    on_load(function (toolchain)
+        assert(toolchain:get("patch.prepared", {load = false}),
+            "on_toolchain_prepare did not run before load")
+        assert(toolchain:config("patch.checked"), "check did not run before load")
+        toolchain:set("toolset.cc", "gcc@" .. os.programfile())
+    end)
+
+toolchain("bad")
+    set_kind("standalone")
+    set_runtimes("bad-static-runtime")
+    on_check(function ()
+        raise("unused bad toolchain must never be detected")
+    end)
+    on_load(function ()
+        raise("unused bad toolchain must never be loaded")
+    end)
+toolchain_end()
 
 local function _marker(name)
     return path.join(os.projectdir(), ".patch-" .. name)

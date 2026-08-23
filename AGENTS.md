@@ -15,7 +15,7 @@ The goal is to keep the patches small, easy to rebase, easy to test, and behavio
 - Keep `AGENTS.md` at the root of that Xmake checkout.
 - `PATCH/` is only for patch-specific auxiliary files owned by this project: tests, rebundling utilities, fixtures, generated test artifacts, and related local support files.
 - Keep `PATCH/.gitignore` there as well.
-- Keep one `PATCH/xmake.lua` test project covering all patched behavior.
+- Keep one `PATCH/xmake.lua` test project for the patch-local regression coverage that is intentionally retained. Do not keep separate Python test runners. The Windows IDL patch intentionally has no patch-local regression test.
 - Upstream Xmake files retain their normal paths in the root checkout and are edited in place; they are **not** copied under `PATCH/`.
 - Modify the fewest upstream files possible.
 - Prefer the simplest correct implementation and the least code.
@@ -129,6 +129,8 @@ Preserve these invariants:
 - the IDL autogen include directory is added once logically, remains `public`, and propagates to dependents;
 - project-generator/build-command discovery keeps the same include setup without reintroducing config-time source materialization.
 
+No patch-local regression test is retained for this IDL patch; do not add IDL coverage to `PATCH/xmake.lua` unless the user explicitly requests it.
+
 Intended upstream footprint: exactly `xmake/rules/platform/windows/idl/idl.lua` and `xmake/rules/platform/windows/idl/xmake.lua`.
 
 ## 2. No-op build performance
@@ -198,7 +200,7 @@ Do not recreate any earlier discarded design: no selected-build closure, `__buil
 
 ### Required regression proof
 
-`PATCH/xmake.lua` and `PATCH/test_lazy_toolchain.py` are the executable specification. Keep two custom standalone descriptors: `good`, whose `on_check` requires the prepare marker/state and whose `on_load` exposes a fake `cc` using `os.programfile()`, and `bad`, whose `on_check`/`on_load` unconditionally fail. The global prepare callback must exercise the normal sandbox (`os.mkdir`, `os.runv`, file writing) and mark which toolchain was prepared.
+`PATCH/xmake.lua` is the executable specification. Keep the two custom standalone descriptors directly in that file: `good`, whose `on_check` requires the prepare marker/state and whose `on_load` exposes a fake `cc` using `os.programfile()`, and `bad`, whose `on_check`/`on_load` unconditionally fail. The global prepare callback must exercise the normal sandbox (`os.mkdir`, `os.runv`, file writing) and mark which toolchain was prepared.
 
 The minimum regression sequence is:
 
