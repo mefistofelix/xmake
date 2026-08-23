@@ -73,6 +73,49 @@ target("unused")
         io.writefile(_marker("config-unused"), "1")
     end)
 
+target("before-sources")
+    set_kind("phony")
+    set_default(false)
+    before_sources(function ()
+        local sourcedir = path.join(os.projectdir(), ".patch-before-sources-files")
+        local marker = _marker("before-sources-count")
+        local count = os.isfile(marker) and (tonumber(io.readfile(marker)) or 0) or 0
+        io.writefile(marker, tostring(count + 1))
+        os.mkdir(sourcedir)
+        io.writefile(path.join(sourcedir, "generated.c"), "")
+    end)
+
+task("test-before-sources")
+    set_menu {usage = "xmake test-before-sources", description = "Run before_sources regression tests", options = {}}
+    on_run(function ()
+        local project = import("core.project.project")
+        local sourcedir = path.join(os.projectdir(), ".patch-before-sources-files")
+        local marker = _marker("before-sources-count")
+        os.tryrm(sourcedir)
+        os.tryrm(marker)
+
+        local template = project.target("before-sources")
+        local empty = template:sourcefiles()
+        assert(#empty == 0, "target without add_files unexpectedly has sources")
+        assert(not os.isfile(marker), "before_sources ran for a target without add_files")
+
+        local target = template:clone()
+        target:set("files", ".patch-before-sources-files/*.c")
+        local sourcefiles = target:sourcefiles()
+        assert(#sourcefiles == 1 and path.filename(sourcefiles[1]) == "generated.c",
+            "before_sources output was not visible to first add_files materialization")
+        assert(io.readfile(marker) == "1", "before_sources did not run exactly once")
+
+        local sourcefiles_again = target:sourcefiles()
+        assert(#sourcefiles_again == 1 and sourcefiles_again[1] == sourcefiles[1],
+            "cached source list changed after first materialization")
+        assert(io.readfile(marker) == "1", "before_sources ran more than once")
+
+        os.tryrm(sourcedir)
+        os.tryrm(marker)
+        print("before_sources patch tests passed")
+    end)
+
 task("test-noop")
     set_menu {usage = "xmake test-noop", description = "Run no-op build performance regression tests", options = {}}
     on_run(function ()

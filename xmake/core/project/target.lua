@@ -2140,6 +2140,15 @@ function _instance:sourcefiles()
         return {}, false
     end
 
+    -- prepare sources once, immediately before the first source-list materialization
+    if not self._BEFORE_SOURCES_DONE then
+        self._BEFORE_SOURCES_DONE = true
+        local before_sources = self:script("sources_before")
+        if before_sources then
+            before_sources(self)
+        end
+    end
+
     -- match files
     local i = 1
     local count = 0
@@ -3197,6 +3206,7 @@ function target.apis()
         ,   "target.before_run"
         ,   "target.before_test"
         ,   "target.before_config"
+        ,   "target.before_sources"
         ,   "target.before_prepare"
         ,   "target.before_prepare_file"
         ,   "target.before_prepare_files"
