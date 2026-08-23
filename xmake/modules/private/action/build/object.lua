@@ -116,7 +116,7 @@ function _do_build_file(target, sourcefile, opt)
         if target:has_sourcekind("cc") and pcoutputfile and not build_pch then
             table.insert(dependinfo.files, pcoutputfile)
         end
-        depend.save(dependinfo, dependfile)
+        depend.save(dependinfo, dependfile, {target = target})
     end
 end
 

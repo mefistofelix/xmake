@@ -31,6 +31,7 @@ function _load_depfiles(parser, dependinfo, depfiles, opt)
         else
             dependinfo.files = depfiles
         end
+        return true
     end
 end
 
@@ -50,6 +51,18 @@ function _get_depfiles_parser(depfiles_format)
     return parser or nil
 end
 
+-- materialize depfiles from the compiler into the dependency list
+function _materialize_depfiles(dependinfo, opt)
+    local depfiles = dependinfo.depfiles
+    if depfiles then
+        local depfiles_parser = _get_depfiles_parser(dependinfo.depfiles_format)
+        if _load_depfiles(depfiles_parser, dependinfo, depfiles, opt) then
+            dependinfo.depfiles = nil
+            dependinfo.depfiles_format = nil
+        end
+    end
+end
+
 -- load dependent info from the given file (.d)
 --
 -- @param dependfile    the depend file path
@@ -61,13 +74,7 @@ function load(dependfile, opt)
         -- may be the depend file has been incomplete when if the compilation process is abnormally interrupted
         local dependinfo = try { function() return io.load(dependfile) end }
         if dependinfo then
-            -- attempt to load depfiles from the compilers
-            local depfiles = dependinfo.depfiles
-            if depfiles then
-                local depfiles_parser = _get_depfiles_parser(dependinfo.depfiles_format)
-                _load_depfiles(depfiles_parser, dependinfo, depfiles, opt)
-                dependinfo.depfiles = nil
-            end
+            _materialize_depfiles(dependinfo, opt)
             return dependinfo
         end
     end
@@ -92,8 +99,13 @@ end
 -- @param dependinfo    the depend info table {files = {}, values = {}}
 -- @param dependfile    the depend file path
 --
-function save(dependinfo, dependfile)
-    io.save(dependfile, dependinfo)
+function save(dependinfo, dependfile, opt)
+    local savedinfo = dependinfo
+    if dependinfo.depfiles then
+        savedinfo = table.clone(dependinfo, 2)
+        _materialize_depfiles(savedinfo, opt)
+    end
+    io.save(dependfile, savedinfo)
 end
 
 -- is the dependent info changed?

@@ -1,4 +1,4 @@
-set_project("xmake-lazy-toolchain-patch-tests")
+set_project("xmake-patch-tests")
 
 toolchain("good")
     set_kind("standalone")
@@ -71,4 +71,74 @@ target("unused")
     set_toolchains("bad")
     on_config(function ()
         io.writefile(_marker("config-unused"), "1")
+    end)
+
+task("test-noop")
+    set_menu {usage = "xmake test-noop", description = "Run no-op build performance regression tests", options = {}}
+    on_run(function ()
+        local depend = import("core.project.depend")
+        local project = import("core.project.project")
+
+        local function contains(values, expected)
+            for _, value in ipairs(values or {}) do
+                if path.translate(value) == path.translate(expected) then
+                    return true
+                end
+            end
+        end
+
+        local removedir = path.join(os.projectdir(), ".patch-noop-remove")
+        os.mkdir(removedir)
+        io.writefile(path.join(removedir, "keep.c"), "")
+        io.writefile(path.join(removedir, "remove.c"), "")
+        io.writefile(path.join(removedir, "ignored.c"), "")
+        local synthetic = project.target("dep"):clone()
+        synthetic:set("files", ".patch-noop-remove/*.c|ignored.c", "__remove_./.patch-noop-remove/remove*.c")
+        local sourcefiles = synthetic:sourcefiles()
+        assert(#sourcefiles == 1 and contains(sourcefiles, ".patch-noop-remove/keep.c"),
+            "remove_files filtering changed: %s", table.concat(sourcefiles, ", "))
+
+        local dependdir = path.join(os.projectdir(), ".patch-noop-depend")
+        os.mkdir(dependdir)
+        local currentfile = path.join(dependdir, "current.d")
+        local oldfile = path.join(dependdir, "old.d")
+        local plainfile = path.join(dependdir, "plain.d")
+        local depfiles = "object.o: .patch-noop-depend/a.h .patch-noop-depend/b.h"
+        local dependinfo = {
+            files = {"seed.h"},
+            values = {"value"},
+            depfiles_format = "gcc",
+            depfiles = depfiles
+        }
+
+        depend.save(dependinfo, currentfile)
+        assert(dependinfo.depfiles == depfiles and dependinfo.depfiles_format == "gcc",
+            "depend.save mutated compiler dependency payload")
+        assert(#dependinfo.files == 1 and dependinfo.files[1] == "seed.h",
+            "depend.save mutated caller dependency files")
+        local saved = io.load(currentfile)
+        assert(saved and not saved.depfiles and not saved.depfiles_format,
+            "new dependency record retained raw compiler payload")
+        assert(contains(saved.files, "seed.h") and contains(saved.files, ".patch-noop-depend/a.h")
+            and contains(saved.files, ".patch-noop-depend/b.h"),
+            "new dependency record did not materialize compiler dependencies")
+
+        io.save(oldfile, dependinfo)
+        local old = depend.load(oldfile)
+        assert(old and not old.depfiles and not old.depfiles_format,
+            "old compiler dependency record was not materialized on load")
+        assert(contains(old.files, "seed.h") and contains(old.files, ".patch-noop-depend/a.h")
+            and contains(old.files, ".patch-noop-depend/b.h"),
+            "old dependency record lost compiler dependencies")
+
+        local plain = {files = {"plain.h"}, values = {"plain"}}
+        depend.save(plain, plainfile)
+        local plainsaved = io.load(plainfile)
+        assert(plainsaved and #plainsaved.files == 1 and plainsaved.files[1] == "plain.h"
+            and #plainsaved.values == 1 and plainsaved.values[1] == "plain",
+            "non-compiler dependency record changed")
+
+        os.tryrm(removedir)
+        os.tryrm(dependdir)
+        print("no-op build performance patch tests passed")
     end)

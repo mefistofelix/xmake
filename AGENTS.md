@@ -147,6 +147,23 @@ Preserve these invariants:
 - old records containing raw compiler dependency payloads remain readable and are materialized on load;
 - non-compiler dependency records and downstream behavior remain unchanged.
 
+### Technical model and upstream change points
+
+- `xmake/core/project/target.lua::_instance:sourcefiles()` compiles normalized `remove_files()` patterns once before scanning the resolved source list. Keep whole-pattern anchoring and the existing `|...` suffix stripping semantics unchanged.
+- `xmake/modules/core/project/depend.lua` materializes compiler `depfiles` into `files` at save time. Clone the caller table before materialization so `depend.save()` remains non-mutating, and reuse the same materialization helper when loading old raw records.
+- `xmake/modules/private/action/build/object.lua` passes `{target = target}` to `depend.save()` because its existing `depend.load()` path already supplies that target context; this preserves GCC C++ module mapping when parsing moves from load time to save time. The SWIG path remains unchanged because its existing load path parses without target context.
+- Do not move compiler parsing into compiler implementations, add a new dependency-record format, or change `depend.is_changed()` semantics.
+
+Intended upstream footprint: exactly three files:
+
+- `xmake/core/project/target.lua`;
+- `xmake/modules/core/project/depend.lua`;
+- `xmake/modules/private/action/build/object.lua`.
+
+### Required regression proof
+
+`PATCH/xmake.lua` contains the retained no-op regression task. `xmake test-noop` must prove `remove_files()` filtering still handles normalized patterns and `add_files()` suffix exclusions, new compiler records are saved with materialized dependency paths but without raw `depfiles`, the caller table is unchanged, old raw compiler records still materialize on load, and ordinary non-compiler records are unchanged. The test must not require a host compiler.
+
 ## 3. Lazy toolchain initialization
 
 **Goal:** declaring/configuring a toolchain must not detect it. Detection happens only at the first real use of that runtime toolchain instance.

@@ -2217,15 +2217,17 @@ function _instance:sourcefiles()
 
     -- remove all source files which need be removed
     if removed_count > 0 then
+        local patterns = {}
+        for _, removed_file in ipairs(sourcefiles_removed) do
+            local pattern = path.translate((removed_file:gsub("|.*$", "")))
+            if pattern:sub(1, 2):find('%.[/\\]') then
+                pattern = pattern:sub(3)
+            end
+            table.insert(patterns, "^" .. path.pattern(pattern) .. "$")
+        end
         table.remove_if(sourcefiles, function (i, sourcefile)
-            for _, removed_file in ipairs(sourcefiles_removed) do
-                local pattern = path.translate((removed_file:gsub("|.*$", "")))
-                if pattern:sub(1, 2):find('%.[/\\]') then
-                    pattern = pattern:sub(3)
-                end
-                pattern = path.pattern(pattern)
-                -- we need to match whole pattern, https://github.com/xmake-io/xmake/issues/3523
-                if sourcefile:match("^" .. pattern .. "$") then
+            for _, pattern in ipairs(patterns) do
+                if sourcefile:match(pattern) then
                     return true
                 end
             end
