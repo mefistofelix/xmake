@@ -51,8 +51,9 @@ def main() -> None:
         # The two build jobs collide on target:tool("cc"); internal toolchain assertions
         # prove prepare -> check -> load ordering and exactly-once initialization.
         run(exe, "build", "-j", "2", "app")
-        for name in ("config-dep", "config-app", "build-dep", "use-one", "use-two"):
+        for name in ("config-dep", "config-app", "build-dep", "use-one", "use-two", "prepare-good"):
             require(name)
+        forbid("prepare-bad")
         forbid("config-unused")
         assert not marker("unused-config").exists(), "unrelated configfiles were generated during selected build"
 
@@ -64,6 +65,8 @@ def main() -> None:
         run(exe, "f", "-c", "--toolchain=good", env=env)
         for name in ("config-dep", "config-app", "config-unused"):
             require(name)
+        forbid("prepare-good")
+        forbid("prepare-bad")
         assert marker("unused-config").is_dir(), "standalone config did not generate unrelated configfiles"
 
         print("lazy toolchain patch tests passed")

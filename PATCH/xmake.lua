@@ -11,6 +11,10 @@ on_toolchain_prepare(function (toolchain)
     if name == "good" or name == "bad" then
         assert(not toolchain:get("patch.prepared", {load = false}),
             "on_toolchain_prepare ran more than once for %s", name)
+        local preparedir = path.join(os.projectdir(), ".patch-toolchain-prepare")
+        os.mkdir(preparedir)
+        os.runv(os.programfile(), {"--version"})
+        io.writefile(_marker("prepare-" .. name), preparedir)
         toolchain:set("patch.prepared", true)
     end
 end)
@@ -52,7 +56,8 @@ target("unused")
     add_configfiles("fixtures/unused.in", {onlycopy = true})
     on_config(function (target)
         local bad = assert(target:toolchain("bad"), "bad toolchain missing")
-        assert(bad:config("patch.checked"), "unused target was configured before its toolchain was checked")
+        assert(bad:get("patch.check_state", {load = false}) == "config",
+            "unused target was configured before its toolchain was checked")
         -- make source discovery observable if this unrelated target is configured
         target:sourcefiles()
         io.writefile(_marker("config-unused"), "1")

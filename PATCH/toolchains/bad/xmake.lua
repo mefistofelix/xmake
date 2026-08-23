@@ -1,10 +1,10 @@
 toolchain("bad")
     set_kind("standalone")
     on_check(function (toolchain)
-        assert(toolchain:get("patch.prepared", {load = false}),
-            "on_toolchain_prepare did not run before bad check")
-        assert(not toolchain:config("patch.checked"), "bad check ran more than once")
-        toolchain:config_set("patch.checked", true)
+        local prepared = toolchain:get("patch.prepared", {load = false})
+        local state = toolchain:get("patch.check_state", {load = false})
+        assert(not state, "bad check ran more than once")
+        toolchain:set("patch.check_state", prepared and "build" or "config")
         return os.getenv("PATCH_ALLOW_BAD") == "1"
     end)
     on_load(function ()

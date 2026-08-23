@@ -346,7 +346,7 @@ function _instance:configs_save()
     utils.warning("toolchain:configs_save() is deprecated, please remove it.")
 end
 
--- run the project-level prepare hook once per runtime toolchain instance
+-- run the build-only project-level prepare hook once per runtime toolchain instance
 function _instance:_prepare()
     local info = self:info()
     if not info:get("__prepared") then
@@ -384,15 +384,18 @@ function _instance:_check_unlocked()
     return checked
 end
 
--- serialize prepare/check/load so concurrent first users share one boundary
-function _instance:_initialize(load)
+-- serialize build-time prepare/check/load so concurrent first users share one boundary
+function _instance:_initialize(load, opt)
+    opt = opt or {}
     local lockname = "toolchain_init_" .. (self:cachekey() or tostring(self))
     local locked = scheduler.co_running() ~= nil
     if locked then
         scheduler.co_lock(lockname)
     end
     local ok, result_or_errors = utils.trycall(function ()
-        self:_prepare()
+        if opt.prepare or option.taskname() == "build" then
+            self:_prepare()
+        end
         local checked = self:_check_unlocked()
         if checked and load then
             self:_load_unlocked()
@@ -412,8 +415,11 @@ end
 --
 -- @return      true if the toolchain is available
 --
-function _instance:check()
-    return self:_initialize(false)
+function _instance:check(opt)
+    if opt and opt.prepare then
+        return self:_initialize(false, opt)
+    end
+    return self:_check_unlocked()
 end
 
 -- do load manually, it will call on_load()

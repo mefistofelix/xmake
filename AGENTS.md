@@ -66,6 +66,8 @@ If priorities change and another patch must be implemented before the current un
 - Do not change source extensions, target kinds, or test semantics solely to bypass Xmake toolchain/configuration behavior that the project is supposed to patch.
 - If an exact regression test is blocked by eager initialization of an unavailable host toolchain, treat that as evidence that the **lazy toolchain initialization / selected build graph patch must be implemented first**. Do not work around that failure in the test.
 - A milestone is complete only when its exact behavioral tests pass with the rebundled executable in a clean environment that does not rely on `XMAKE_PROGRAM_DIR` or host compiler availability.
+- Project callbacks/hooks introduced or exercised by this patch must run in the normal Xmake project/runtime sandbox. The normal `os` sandbox API must be available there, including operations such as `os.mkdir`, `os.run`/`os.runv`, file/path checks, environment access, and the rest of the standard callback `os.*` surface; do not implement a reduced ad-hoc callback environment.
+- Do **not** add ad-hoc cache invalidation, timestamp touching, forced rechecks, or private cache resets to make these patches work. Hook into Xmake's existing lazy lifecycle and dependency/cache machinery and let Xmake's normal `depend`, cache, dirtiness, and rebuild semantics decide when work is repeated.
 
 ## Rebundle tool
 
@@ -113,9 +115,11 @@ Preserve these invariants:
 
 **Goal:** targets/toolchains outside the selected build closure must stay inert.
 
-First real use must follow:
+During an actual build, first real toolchain use must follow lazily:
 
 `on_toolchain_prepare -> check -> load -> use`
+
+`on_toolchain_prepare` is build-driven: merely loading the project or running standalone `xmake config` must not execute it.
 
 Preserve these invariants:
 
@@ -124,9 +128,10 @@ Preserve these invariants:
 - unavailable toolchains on unused targets remain inert;
 - `toolconfig()` does not activate unused candidate toolchains;
 - concurrent users share one serialized initialization boundary;
-- global `on_toolchain_prepare` runs in the project/runtime sandbox and may mutate the descriptor before detection;
+- global `on_toolchain_prepare` runs only for a toolchain actually reached by an active build, in the normal project/runtime sandbox, and may materialize files/tools or mutate the descriptor before Xmake's normal toolchain check/use path;
+- toolchain preparation does not manually clear `__checked`, detection caches, or other Xmake cache state; normal Xmake cache semantics remain authoritative;
 - phony targets needing no compiler use the inert `none` fallback;
-- standalone `xmake config` keeps normal all-target semantics.
+- standalone `xmake config` keeps normal all-target semantics and does not run build-only `on_toolchain_prepare` hooks.
 
 Current upstream Lua files for this patch:
 
@@ -144,15 +149,25 @@ Current upstream Lua files for this patch:
 
 **Goal:** selected targets may prepare files before source discovery/materialization.
 
+For a target actually reached by an active build, the intended lazy order is:
+
+`on_toolchain_prepare -> toolchain check -> before_sources -> add_files() discovery/materialization -> dependency targets build -> add_files() build_callback -> normal before_build_file[s]/rule build`
+
+Each stage may materialize files, directories, executables, downloaded sources, or other artifacts needed by the following stage. Later stages must observe artifacts created by earlier stages in the same build invocation.
+
 Preserve these invariants:
 
-- the target's standalone toolchain finishes `on_toolchain_prepare` and `check()` first;
-- `before_sources` runs before build-driven source glob resolution/materialization;
+- `before_sources` is build-driven and lazy: merely loading/configuring a target does not run it;
+- it is triggered only when the active build is actually about to resolve that target's `add_files()` source list;
+- the target's standalone toolchain finishes build-only `on_toolchain_prepare` and `check()` first, so `before_sources` can use files/tools materialized by toolchain preparation;
+- `before_sources` may itself materialize/download/generate source inputs for that target;
+- `before_sources` runs immediately before that build-driven source glob resolution/materialization;
 - files created there are visible to `add_files()` and its materialization callback in the same invocation;
 - `on_config` calls to `target:sourcebatches()` see the materialized list;
 - `on_prepare` sees the same materialized sources;
 - unrelated targets do not run `before_sources`;
-- standalone `xmake config` does not run `before_sources`.
+- standalone `xmake config` does not run `before_sources` even if it inspects/configures the target;
+- targets whose source list is never needed by the active build do not run `before_sources`.
 
 ## 5. `add_files()` source materialization
 
@@ -160,7 +175,7 @@ Preserve these invariants:
 
 ### API contract
 
-`callback(sourcefile, sources, depend)` runs during source discovery.
+`callback(sourcefile, sources, depend)` runs lazily during source discovery, only when that target's `add_files()` list is actually being resolved for the active build.
 
 - `sourcefile`: matched candidate, or the declared path/pattern when nothing matched.
 - `sources`: mutable effective source list, initially `{sourcefile}`.
@@ -170,9 +185,10 @@ Preserve these invariants:
 
 `build_callback(target, sourcefile, sourcefiles, depend, opt)` is optional and runs later in the jobgraph for generators that depend on another target.
 
-- discovery alone may change the effective source list;
+- discovery alone may change the effective source list and dependency metadata;
+- `build_callback` may consume tools/executables/artifacts produced by direct dependency targets in the same build invocation;
 - mutating `sourcefiles` inside `build_callback` has no source-list effect;
-- all direct `add_deps()` targets, including `{links = false}`, finish before the build callback;
+- all direct `add_deps()` targets, including `{links = false}`, finish before the build callback, so code generators built as dependencies are available to it;
 - all build callbacks finish before normal `before_build_file[s]` and build-file rules;
 - disabling `build.jobgraph` must fail immediately with a clear diagnostic;
 - build callbacks are not translated into IDE/project-generator commands.
@@ -196,6 +212,7 @@ With `build_callback`, declared resulting paths may be absent during discovery b
 - Callbacks may append additional concrete dependencies.
 - `xmake.lua` is never added implicitly to each materialization dependency record.
 - Missing entries in `depend.files` retain normal Xmake semantics and therefore keep the record dirty.
+- Materialization callbacks do not manually invalidate Xmake caches or touch mtimes to force rebuilds; they express concrete inputs/results through the existing dependency machinery and let Xmake decide dirtiness.
 - Discovery results are cached in `dependinfo.result`; unchanged records restore that list without rerunning Lua.
 - `build_callback` uses a separate dependfile and runs when concrete inputs change, outputs are missing, or the target is rebuilt.
 - Its dependfile is saved only after successful generation.
