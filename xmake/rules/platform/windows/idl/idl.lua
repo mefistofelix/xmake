@@ -111,12 +111,9 @@ function generate_single(target, sourcefile, opt)
 end
 
 function configure(target)
-    local sourcebatch = target:sourcebatches()["platform.windows.idl"]
-    if sourcebatch then
-        local autogendir = path.join(target:autogendir(), "platform/windows/idl")
-        os.mkdir(autogendir)
-        target:add("includedirs", autogendir, {public = true})
-    end
+    local autogendir = path.join(target:autogendir(), "platform/windows/idl")
+    os.mkdir(autogendir)
+    target:add("includedirs", autogendir, {public = true})
 end
 
 function generate_idl(target, jobgraph, sourcebatch, opt)

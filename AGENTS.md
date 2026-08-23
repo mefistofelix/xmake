@@ -102,15 +102,34 @@ It must:
 
 ## 1. Lazy Windows IDL source discovery
 
-**Goal:** IDL support must not force global or premature source-glob expansion during configuration.
+**Goal:** the built-in Windows IDL rule must not force global or premature `add_files()` source-glob expansion merely because a target is configured for Windows. This patch is standalone and belongs entirely to the existing `platform.windows.idl` rule; it does not depend on `before_sources`, add-files callbacks, lazy toolchains, selected-target plumbing, or any new core lifecycle.
+
+### Root cause and technical model
+
+`platform.windows` depends on `platform.windows.idl`, so the IDL rule is present on ordinary Windows C/C++ targets even when they declare **no `.idl` files at all**. Upstream `platform.windows.idl` registered an `on_config` callback that called `idl.configure(target)`, and upstream `idl.configure()` called `target:sourcebatches()` only to discover whether an IDL batch existed. `target:sourcebatches()` materializes the target's complete source list, so this IDL-specific config callback accidentally expands every unrelated `add_files()` glob during ordinary Windows configuration.
+
+The canonical regression is therefore deliberately a Windows target with **zero IDL declarations** and an unrelated absent glob such as `add_files("generated/*.c")`. On unpatched Xmake, banal `xmake f -c` reaches the IDL rule's `on_config -> target:sourcebatches()` path and emits the normal `cannot match add_files("generated\\*.c")` warning, proving that the unrelated source glob was materialized. With this patch, the same config must not inspect that glob and must not emit that warning.
+
+### Reconstruction recipe
+
+1. In `xmake/rules/platform/windows/idl/idl.lua::configure(target)`, remove the `target:sourcebatches()["platform.windows.idl"]` probe and its conditional. `configure()` becomes purely declarative: compute `path.join(target:autogendir(), "platform/windows/idl")`, create that directory, and add it to `includedirs` with `{public = true}`. Do not inspect any target source list here.
+2. In `xmake/rules/platform/windows/idl/xmake.lua`, remove the IDL `on_config("windows", "mingw", ...)` callback completely. The `.idl` extension already binds this file rule to the correct source batch; do not add manual file-pattern recognition or inspect `target:get("files")`.
+3. Reuse the existing IDL file-rule lifecycle. At the beginning of `before_build_files`, call `idl.configure(target)` and then run the existing `idl.generate_idl(...)`. Because this hook already receives the `platform.windows.idl` source batch, configuration occurs only when Xmake is actually processing IDL files.
+4. Add the corresponding `before_buildcmd_files` hook that calls `idl.configure(target)`. Project generators consume build-command hooks instead of the jobgraph `before_build_files` hook; this preserves the generated/public include setup for CMake/Visual Studio/Ninja/Make project generation without restoring eager config-time source discovery.
+5. Do not change `generate_idl`, `generate_single`, `build_idlfiles`, MIDL invocation, generated C compilation, target/source core, or any global configuration/build action.
+6. Do not add source-cache invalidation, force `sourcefiles()`/`sourcebatches()` refreshes, scan raw `add_files()` patterns, or create a new generic lazy-source mechanism for this patch. The fix is specifically to stop the IDL rule from asking for source batches during `on_config` and to use its existing file-specific hooks instead.
+
+The current target scope is built by Xmake with deduplication enabled, so repeated `target:add("includedirs", autogendir, {public = true})` through the build/buildcmd paths does not require the old patch's manual include-directory deduplication loop. Keep the `public` visibility: project generators must expose the IDL autogen directory both to the target and through its interface/dependents.
 
 Preserve these invariants:
 
-- generated-source globs may become populated during selected-target `on_prepare()` and compile in the same invocation;
-- unrelated enabled targets are not scanned or materialized;
-- normal IDL generation still runs;
-- the IDL autogen include directory is added once, remains `public`, and propagates to dependents;
-- project-generator/build-command discovery keeps the same include setup without duplicate mutation.
+- banal Windows `xmake config` does not materialize unrelated `add_files()` globs merely because `platform.windows.idl` is in the rule dependency chain, including targets that contain no IDL declaration at all;
+- generated-source IDL globs may become populated during selected-target `on_prepare()` and are then visible to the normal IDL build/generator path in the same invocation;
+- normal IDL/MIDL generation and generated C compilation remain unchanged;
+- the IDL autogen include directory is added once logically, remains `public`, and propagates to dependents;
+- project-generator/build-command discovery keeps the same include setup without reintroducing config-time source materialization.
+
+Intended upstream footprint: exactly `xmake/rules/platform/windows/idl/idl.lua` and `xmake/rules/platform/windows/idl/xmake.lua`.
 
 ## 2. No-op build performance
 
