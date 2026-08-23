@@ -81,7 +81,7 @@ If priorities change and another patch must be implemented before the current un
 - Do not change source extensions, target kinds, or test semantics solely to bypass Xmake toolchain/configuration behavior that the project is supposed to patch.
 - If an exact regression test is blocked by eager initialization of an unavailable host toolchain, treat that as evidence that the **lazy toolchain initialization patch must be implemented first**. Do not work around that failure in the test.
 - A milestone is complete only when its exact behavioral tests pass with the rebundled executable in a clean environment that does not rely on `XMAKE_PROGRAM_DIR` or host compiler availability.
-- Project callbacks/hooks introduced or exercised by this patch must run in the normal Xmake project/runtime sandbox. The normal `os` sandbox API must be available there, including operations such as `os.mkdir`, `os.run`/`os.runv`, file/path checks, environment access, and the rest of the standard callback `os.*` surface; do not implement a reduced ad-hoc callback environment.
+- Project callbacks/hooks introduced or exercised by this patch must run in the normal Xmake project/runtime sandbox. The normal `os` sandbox API must be available there, including operations such as `os.mkdir`, `os.run`/`os.runv`/`os.vrunv`, file/path checks, environment access, and the rest of the standard callback `os.*` surface; do not implement a reduced ad-hoc callback environment.
 - Do **not** add ad-hoc cache invalidation, timestamp touching, forced rechecks, or private cache resets to make these patches work. Hook into Xmake's existing lazy lifecycle and dependency/cache machinery and let Xmake's normal `depend`, cache, dirtiness, and rebuild semantics decide when work is repeated.
 
 ## Rebundle tool
@@ -217,7 +217,7 @@ Do not recreate any earlier discarded design: no selected-build closure, `__buil
 
 ### Required regression proof
 
-`PATCH/xmake.lua` is the executable specification. Keep the two custom standalone descriptors directly in that file: `good`, whose `on_check` requires the prepare marker/state and whose `on_load` exposes a fake `cc` using `os.programfile()`, and `bad`, whose `on_check`/`on_load` unconditionally fail. The global prepare callback must exercise the normal sandbox (`os.mkdir`, `os.runv`, file writing) and mark which toolchain was prepared.
+`PATCH/xmake.lua` is the executable specification. Keep the two custom standalone descriptors directly in that file: `good`, whose `on_check` requires the prepare marker/state and whose `on_load` exposes a fake `cc` using `os.programfile()`, and `bad`, whose `on_check`/`on_load` unconditionally fail. The global prepare callback must exercise the normal sandbox (`os.mkdir`, `os.vrunv`, file writing) and mark which toolchain was prepared.
 
 The minimum regression sequence is:
 
@@ -254,56 +254,48 @@ Intended upstream footprint: exactly `xmake/core/project/target.lua`.
 
 ### API contract
 
-`callback(sourcefile, sources, depend)` runs lazily during source discovery, only when that target's `add_files()` list is actually being resolved for the active build.
+`source(sourcefile, sourcefiles, depend)` runs lazily when that `add_files()` candidate is first resolved by normal source discovery.
 
-- `sourcefile`: matched candidate, or the declared path/pattern when nothing matched.
-- `sources`: mutable effective source list, initially `{sourcefile}`.
-- `depend`: mutable dependinfo, initially containing `sourcefile` in `depend.files`.
-- callback return values are ignored.
+`build(sourcefile, sourcefiles, depend)` is optional and is the later phase of the same deterministic transformation. It runs in the jobgraph only so it can wait for target dependencies.
+
+For both callbacks:
+
+- `sourcefile`: matched candidate, or the declared path/pattern when nothing matched;
+- `sourcefiles`: mutable effective source list, initially `{sourcefile}`;
+- `depend`: the same mutable dependinfo shared by both phases, initially containing `sourcefile` in `depend.files`;
+- return values are ignored;
+- both callbacks run in the normal Xmake sandbox and have the ordinary `os.*`/`io.*` surface, including `os.runv` and `os.vrunv`;
 - file contents are read explicitly by the callback when needed.
 
-`build_callback(target, sourcefile, sourcefiles, depend, opt)` is optional and runs later in the jobgraph for generators that depend on another target.
+`source` may keep, replace, expand, or remove the original source, generate or modify files, and append concrete incremental dependencies. `build` may also mutate the passed tables, but because it runs after source batches/jobs have been constructed, changing `sourcefiles` there does not rewrite the current invocation's already-scheduled source jobs. It may freely extend `depend` for deterministic inputs/outputs.
 
-- discovery alone may change the effective source list and dependency metadata;
-- `build_callback` may consume tools/executables/artifacts produced by direct dependency targets in the same build invocation;
-- mutating `sourcefiles` inside `build_callback` has no source-list effect;
-- all direct `add_deps()` targets, including `{links = false}`, finish before the build callback, so code generators built as dependencies are available to it;
-- all build callbacks finish before normal `before_build_file[s]` and build-file rules;
-- disabling `build.jobgraph` must fail immediately with a clear diagnostic;
-- build callbacks are not translated into IDE/project-generator commands.
-
-### Source semantics
-
-The discovery callback may:
-
-- keep, replace, expand, or remove the original source;
-- generate or modify files;
-- add incremental dependencies;
-- run for a declared input that does not yet exist.
-
-Without `build_callback`, only resulting paths that exist enter the target source list.
-With `build_callback`, declared resulting paths may be absent during discovery because the build job will materialize them before normal file rules run.
+Without `build`, only resulting paths that exist enter the target source list. With `build`, resulting paths may be absent during discovery because the later job is responsible for materializing them.
 
 ### Dependency semantics
 
 - Dependency tracking is per source candidate, not per `add_files()` declaration.
-- Every effective source path is added to `depend.files`.
-- Callbacks may append additional concrete dependencies.
-- `xmake.lua` is never added implicitly to each materialization dependency record.
-- Missing entries in `depend.files` retain normal Xmake semantics and therefore keep the record dirty.
-- Materialization callbacks do not manually invalidate Xmake caches or touch mtimes to force rebuilds; they express concrete inputs/results through the existing dependency machinery and let Xmake decide dirtiness.
-- Discovery results are cached in `dependinfo.result`; unchanged records restore that list without rerunning Lua.
-- `build_callback` uses a separate dependfile and runs when concrete inputs change, outputs are missing, or the target is rebuilt.
-- Its dependfile is saved only after successful generation.
+- There is exactly one dependfile and one `depend.is_changed()` decision per candidate for the whole `source -> build` transformation.
+- If the candidate is dirty, every callback present for it runs in order: `source` first, then `build` later if configured.
+- If the candidate is clean, neither callback runs and `dependinfo.result` restores the effective source list.
+- Every effective source path is added to `depend.files`; callbacks may append additional concrete dependencies/outputs.
+- The callback's Lua file is not added implicitly to `depend.files`.
+- Missing entries in `depend.files` retain normal Xmake semantics and therefore make the transformation dirty.
+- Do not manually invalidate caches or touch mtimes; express deterministic inputs/results through normal dependency metadata.
+- With only `source`, save the dependfile after successful source materialization.
+- With `build`, do not save after `source`; save the single dependfile only after `build` completes successfully. If either phase fails, the record remains dirty and both phases rerun next time.
 
-### Downstream behavior
+### Jobgraph/downstream behavior
 
-- Do not touch output mtimes artificially.
+- `build` is delayed only for ordering; it does not perform a second dirtiness check.
+- All direct `add_deps()` targets, including `{links = false}`, finish before `build`.
+- All `build` callbacks finish before normal `before_build_file[s]` and build-file rules.
+- Disabling `build.jobgraph` must fail immediately with a clear diagnostic when `build` is used.
+- `build` callbacks are not translated into IDE/project-generator commands.
 - Normal compilation/dependency behavior continues after materialization.
 - Effective sources inherit a clone of the original `add_files(..., {...})` file configuration.
-- Rule selection uses the effective post-callback path.
-- Targets using callbacks refresh built-in language/file rules before source batches are created so transformed extensions resolve normally.
-- Targets without callbacks keep the original fast path.
+- Rule selection uses the effective post-`source` path.
+- Targets using `source`/`build` refresh built-in language/file rules before source batches are created so transformed extensions resolve normally.
+- Targets without either callback keep the original fast path.
 
 ### Implementation scope
 

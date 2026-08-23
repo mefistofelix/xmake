@@ -198,10 +198,13 @@ end
 function _instance:_update_filerules()
     local rulenames = {}
     local extensions = {}
-    for _, sourcefile in ipairs(table.wrap(self:get("files"))) do
+    local sourcefiles = table.clone(table.wrap(self:get("files")))
+    table.join2(sourcefiles, table.wrap(self:data("__add_files_sourcefiles")))
+    for _, sourcefile in ipairs(sourcefiles) do
         local extension = path.extension((sourcefile:gsub("|.*$", "")))
         if not extensions[extension] then
-            local sourcekind = self:extraconf("files", sourcefile, "sourcekind")
+            local fileconfig = self:fileconfig(sourcefile)
+            local sourcekind = (fileconfig and fileconfig.sourcekind) or self:extraconf("files", sourcefile, "sourcekind")
             local lang = sourcekind and language.load_sk(sourcekind) or language.load_ex(extension)
             if lang and lang:rules() then
                 table.join2(rulenames, lang:rules())
@@ -2156,6 +2159,8 @@ function _instance:sourcefiles()
     local sourcefiles_removed = {}
     local sourcefiles_inserted = {}
     local removed_count = 0
+    local has_callbacks = false
+    local buildinfos = {}
     local targetcache = memcache.cache("core.project.target")
     for _, file in ipairs(table.wrap(files)) do
         local file = file
@@ -2166,6 +2171,14 @@ function _instance:sourcefiles()
         if file:startswith(prefix) then
             file = file:sub(#prefix + 1)
             removed = true
+        end
+
+        local source = not removed and self:extraconf("files", file, "source")
+        local build = not removed and self:extraconf("files", file, "build")
+        local callbacks = source or build
+        has_callbacks = has_callbacks or callbacks ~= nil
+        if build and not self:policy("build.jobgraph") then
+            os.raise("add_files(%s): build callback requires policy(\"build.jobgraph\") for target(%s)", file, self:fullname())
         end
 
         local results
@@ -2197,6 +2210,9 @@ function _instance:sourcefiles()
                 end
             end
             targetcache:set2("sourcefiles", file, results)
+            if callbacks and #results == 0 then
+                results = {file}
+            end
         end
         if #results == 0 then
             local sourceinfo = self:sourceinfo("files", file) or {}
@@ -2213,8 +2229,50 @@ function _instance:sourcefiles()
                 sourcefile = path.relative(sourcefile, os.projectdir())
             end
 
-            -- add or remove it
-            if removed then
+            -- transform the source list if callbacks are configured for the active build
+            if callbacks then
+                local depend = sandbox_module.import("core.project.depend", {anonymous = true})
+                local dependfile = self:dependfile(path.join(self:autogendir(), "add_files", hash.strhash128(file .. "\0" .. sourcefile)))
+                local dependinfo = self:is_rebuilt() and {} or (depend.load(dependfile) or {})
+                local sources
+                if depend.is_changed(dependinfo, {lastmtime = os.mtime(dependfile)}) then
+                    dependinfo = {files = {sourcefile}}
+                    sources = {sourcefile}
+                    if source then
+                        assert(sandbox.new(source)):script()(sourcefile, sources, dependinfo)
+                    end
+                    dependinfo.files = table.unique(table.join(dependinfo.files, sources))
+                    dependinfo.result = table.clone(sources)
+                    if build and #sources > 0 then
+                        table.insert(buildinfos, {
+                            callback = assert(sandbox.new(build)):script(),
+                            depend = dependinfo,
+                            dependfile = dependfile,
+                            key = hash.strhash128(file .. "\0" .. sourcefile),
+                            result = table.clone(sources),
+                            sourcefile = sourcefile,
+                            sourcefiles = sources
+                        })
+                    else
+                        depend.save(dependinfo, dependfile)
+                    end
+                else
+                    sources = dependinfo.result or {sourcefile}
+                end
+
+                local fileconfig = self:extraconf("files", file)
+                for _, effectivefile in ipairs(sources) do
+                    if os.exists(effectivefile) or build then
+                        if fileconfig then
+                            self:fileconfig_set(effectivefile, table.clone(fileconfig))
+                        end
+                        if not sourcefiles_inserted[effectivefile] then
+                            table.insert(sourcefiles, effectivefile)
+                            sourcefiles_inserted[effectivefile] = true
+                        end
+                    end
+                end
+            elseif removed then
                 removed_count = removed_count + 1
                 table.insert(sourcefiles_removed, sourcefile)
             elseif not sourcefiles_inserted[sourcefile] then
@@ -2241,6 +2299,11 @@ function _instance:sourcefiles()
                 end
             end
         end)
+    end
+    if has_callbacks then
+        self:data_set("__add_files_sourcefiles", sourcefiles)
+        self:data_set("__add_files_buildinfos", #buildinfos > 0 and buildinfos or nil)
+        self:_update_filerules()
     end
     self._SOURCEFILES = sourcefiles
 

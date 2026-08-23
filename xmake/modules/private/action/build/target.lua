@@ -93,10 +93,69 @@ function _match_sourcebatches(target, filepatterns)
     end
 end
 
+-- add build jobs for dirty add_files() transformations
+function _add_addfiles_buildjobs(jobgraph, target, sourcebatches, opt)
+    if opt.job_kind ~= "build" or opt.buildcmds then
+        return
+    end
+    local buildinfos = target:data("__add_files_buildinfos")
+    if not buildinfos then
+        return
+    end
+
+    local selected = {}
+    for _, sourcebatch in pairs(sourcebatches or {}) do
+        for _, sourcefile in ipairs(sourcebatch.sourcefiles) do
+            selected[sourcefile] = true
+        end
+    end
+
+    local depend = import("core.project.depend", {anonymous = true})
+    local group_name = target:fullname() .. "/add_files_build"
+    local jobsize = jobgraph:size()
+    jobgraph:group(group_name, function ()
+        for _, buildinfo in ipairs(buildinfos) do
+            local matched = false
+            for _, sourcefile in ipairs(buildinfo.result) do
+                if selected[sourcefile] then
+                    matched = true
+                    break
+                end
+            end
+            if matched then
+                local jobname = group_name .. "/" .. buildinfo.key
+                jobgraph:add(jobname, function ()
+                    if option.get("dry-run") then
+                        return
+                    end
+                    buildinfo.callback(buildinfo.sourcefile, buildinfo.sourcefiles, buildinfo.depend)
+                    buildinfo.depend.files = table.unique(table.join(buildinfo.depend.files or {}, buildinfo.sourcefiles))
+                    buildinfo.depend.result = buildinfo.result
+                    depend.save(buildinfo.depend, buildinfo.dependfile)
+                end)
+            end
+        end
+    end)
+    return jobgraph:size() > jobsize and group_name or nil
+end
+
 -- add plain orders for targetjobs and deps
 function _add_targetjobs_plain_orders(jobgraph, target, dep, opt)
     local jobname, jobname_dep
     local job_kind = opt.job_kind
+
+    -- build callbacks wait for every direct target dependency, including links = false
+    local buildinfos = target:data("__add_files_buildinfos")
+    if job_kind == "build" and buildinfos then
+        local dep_end = dep:fullname() .. "/end_build"
+        for _, buildinfo in ipairs(buildinfos) do
+            local buildjob = target:fullname() .. "/add_files_build/" .. buildinfo.key
+            if jobgraph:has(dep_end) and jobgraph:has(buildjob) then
+                jobgraph:add_orders(dep_end, buildjob)
+            end
+        end
+    end
+
     -- Configure the build order only if dependency linking inheritance is not disabled.
     -- e.g. add_deps("foo", {links = false})
     -- @see https://github.com/xmake-io/xmake/issues/6925
@@ -667,6 +726,9 @@ function add_filejobs(jobgraph, target, opt)
         sourcebatches = target:sourcebatches()
     end
 
+    -- delay dirty build callbacks until dependencies are ready, before normal file jobs
+    local addfiles_build_group = _add_addfiles_buildjobs(jobgraph, target, sourcebatches, opt)
+
     -- add file jobs with target stage, e.g. before_xxx_files -> on_xxx_files -> after_xxx_files
     local with_stages = opt.with_stages
     local group, group_before, group_after
@@ -679,7 +741,7 @@ function add_filejobs(jobgraph, target, opt)
     if not with_stages or with_stages:has("after") then
         group_after = add_filejobs_with_stage(jobgraph, target, sourcebatches, "after", opt)
     end
-    jobgraph:add_orders(group_before, group, group_after)
+    jobgraph:add_orders(addfiles_build_group, group_before, group, group_after)
 end
 
 -- add file jobs for the given target and deps
