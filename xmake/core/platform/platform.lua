@@ -33,7 +33,6 @@ local toolchain      = require("tool/toolchain")
 local memcache       = require("cache/memcache")
 local sandbox        = require("sandbox/sandbox")
 local config         = require("project/config")
-local scheduler      = require("sandbox/modules/import/core/base/scheduler")
 
 -- new an instance
 function _instance.new(name, info, opt)
@@ -250,50 +249,11 @@ function _instance:data_add(name, data)
     self._DATA[name] = table.unwrap(table.join(self._DATA[name] or {}, data))
 end
 
--- do check
+-- cache toolchain names only; detection is deferred to real use
 function _instance:check()
-    -- @see https://github.com/xmake-io/xmake/issues/4645#issuecomment-2201036943
-    -- @note avoid check it in the same time leading to deadlock if running in the coroutine
-    local lockname = tostring(self)
-    scheduler.co_lock(lockname)
-
-    -- this platform has been check?
-    local checked = self:_memcache():get("checked")
-    if checked ~= nil then
-        scheduler.co_unlock(lockname)
-        return checked
-    end
-
-    -- check toolchains
-    local toolchains = self:toolchains({all = true})
-    local idx = 1
-    local num = #toolchains
-    local standalone = false
-    local toolchains_valid = {}
-    while idx <= num do
-        local toolchain = toolchains[idx]
-        -- we need to remove other standalone toolchains if standalone toolchain found
-        if (standalone and toolchain:is_standalone()) or not toolchain:check() then
-            table.remove(toolchains, idx)
-            num = num - 1
-        else
-            if toolchain:is_standalone() then
-                standalone = true
-            end
-            idx = idx + 1
-            table.insert(toolchains_valid, toolchain:fullname())
-        end
-    end
-    if #toolchains == 0 then
-        self:_memcache():set("checked", false)
-        scheduler.co_unlock(lockname)
-        return false, "toolchains not found!"
-    end
-
-    -- save valid toolchains
-    config.set(self:_toolchains_key(), toolchains_valid)
-    self:_memcache():set("checked", true)
-    scheduler.co_unlock(lockname)
+    local names = table.wrap(config.get(self:is_host() and "toolchain_host" or "toolchain"))
+    table.join2(names, self._INFO:get("toolchains"))
+    config.set(self:_toolchains_key(), table.unique(names))
     return true
 end
 

@@ -35,7 +35,7 @@ import("configfiles", {alias = "generate_configfiles"})
 import("private.action.require.register", {alias = "register_packages"})
 import("private.action.require.install", {alias = "install_packages"})
 import("private.service.remote_build.action", {alias = "remote_build_action"})
-import("private.utils.target", {alias = "target_utils"})
+import("private.action.utils", {alias = "action_utils"})
 
 -- filter option
 function _option_filter(name)
@@ -330,11 +330,8 @@ force to build in current directory via run `xmake -P .`]], os.projectdir())
             localcache.save()
         end
 
-        -- standalone configuration keeps the normal eager platform check.
-        -- Build-driven configuration initializes toolchains lazily from the selected graph.
-        if not opt.build then
-            instance_plat:check()
-        end
+        -- check platform
+        instance_plat:check()
 
         -- check project options
         if not trybuild then
@@ -369,26 +366,27 @@ force to build in current directory via run `xmake -P .`]], os.projectdir())
             end
         end
 
-        -- Build-driven configuration is restricted to the selected target/dependency closure.
-        -- Standalone `xmake config` keeps the existing all-target semantics.
-        local config_targets
+        -- Build uses the selected target/dependency closure only. The temporary option
+        -- makes the existing target:is_enabled() filters do the rest of the work.
         if opt.build then
-            config_targets = target_utils.get_target_closure(opt.targetnames, {
+            local roots = action_utils.get_targets(opt.targetnames, {
                 group_pattern = opt.group_pattern, all = opt.all})
+            for _, target in ipairs(roots) do
+                target:data_set("__build_selected", true)
+                for _, dep in ipairs(target:orderdeps()) do
+                    dep:data_set("__build_selected", true)
+                end
+            end
+            option.set("__build_selected", true)
         else
             _check_targets()
         end
 
-        -- standalone config checks all target toolchains eagerly as before; build mode checks on first use
-        if recheck and not opt.build then
-            target_utils.check_target_toolchains()
-        end
+        -- load targets; toolchains are detected only on real use
+        project.load_targets({recheck = recheck})
 
-        -- load/configure targets
-        project.load_targets({recheck = recheck, targets = config_targets})
-
-        -- update only the selected targets' config files in build mode
-        generate_configfiles({force = recheck, targets = config_targets})
+        -- update the config files
+        generate_configfiles({force = recheck})
     end
 
     -- dump config

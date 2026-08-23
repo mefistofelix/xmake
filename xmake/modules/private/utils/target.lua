@@ -149,55 +149,11 @@ function get_project_targets()
     return project.targets()
 end
 
--- get the selected build target/dependency closure in dependency order
-function get_target_closure(targetnames, opt)
-    opt = opt or {}
-    local roots = {}
-    if targetnames then
-        for _, targetname in ipairs(table.wrap(targetnames)) do
-            local target = project.target(targetname)
-            if target then
-                table.insert(roots, target)
-            end
-        end
-    else
-        local group_pattern = opt.group_pattern
-        for _, target in pairs(project.targets()) do
-            if target:is_enabled() then
-                local group = target:get("group")
-                if (target:is_default() and not group_pattern) or opt.all or (group_pattern and group and group:match(group_pattern)) then
-                    table.insert(roots, target)
-                end
-            end
-        end
-    end
-
-    local refs = {}
-    local targets = {}
-    local function add_target(target)
-        local fullname = target:fullname()
-        if refs[fullname] then
-            return
-        end
-        refs[fullname] = true
-        for _, depname in ipairs(table.wrap(target:get("deps"))) do
-            local dep = project.target(depname, {namespace = target:namespace()})
-            assert(dep, "unknown target(%s) for %s.deps!", depname, fullname)
-            add_target(dep)
-        end
-        table.insert(targets, target)
-    end
-    for _, target in ipairs(roots) do
-        add_target(target)
-    end
-    return targets
-end
-
 -- check target toolchains
-function check_target_toolchains(targets)
+function check_target_toolchains()
     -- check toolchains configuration for all target in the current project
     -- @note we must check targets after loading options
-    for _, target in pairs(targets or project.targets()) do
+    for _, target in pairs(project.targets()) do
         if target:is_enabled() and (target:get("toolchains") or
                                     not target:is_plat(config.get("plat")) or
                                     not target:is_arch(config.get("arch"))) then
@@ -270,8 +226,7 @@ end
 --
 function config_targets(opt)
     opt = opt or {}
-    local targets = opt.targets or project.ordertargets()
-    for _, target in ipairs(table.wrap(targets)) do
+    for _, target in ipairs(table.wrap(project.ordertargets())) do
         if target:is_enabled() then
             config_target(target, opt)
         end

@@ -198,7 +198,8 @@ function _instance:get(name, opt)
     end
 
     -- lazy loading toolchain
-    if opt.load ~= false and self:_load() then
+    if opt.load ~= false then
+        self:_load()
         return self:info():get(name)
     end
 end
@@ -273,7 +274,6 @@ end
 -- @return          the program path, the tool name
 --
 function _instance:tool(toolkind)
-    -- first real use lazily prepares, checks and loads the toolchain
     if not self:_load() then
         return
     end
@@ -346,7 +346,7 @@ function _instance:configs_save()
     utils.warning("toolchain:configs_save() is deprecated, please remove it.")
 end
 
--- run the build-only project-level prepare hook once per runtime toolchain instance
+-- run the project-level prepare hook before build-time detection
 function _instance:_prepare()
     local info = self:info()
     if not info:get("__prepared") then
@@ -362,8 +362,14 @@ function _instance:_prepare()
     end
 end
 
--- check without taking the initialization lock
-function _instance:_check_unlocked()
+-- do check, we only check it once for all architectures
+--
+-- @return      true if the toolchain is available
+--
+function _instance:check(opt)
+    if opt and opt.prepare then
+        self:_prepare()
+    end
     local checked = self:config("__checked")
     if checked == nil then
         local on_check = self:_on_check()
@@ -384,47 +390,9 @@ function _instance:_check_unlocked()
     return checked
 end
 
--- serialize build-time prepare/check/load so concurrent first users share one boundary
-function _instance:_initialize(load, opt)
-    opt = opt or {}
-    local lockname = "toolchain_init_" .. (self:cachekey() or tostring(self))
-    local locked = scheduler.co_running() ~= nil
-    if locked then
-        scheduler.co_lock(lockname)
-    end
-    local ok, result_or_errors = utils.trycall(function ()
-        if opt.prepare or option.taskname() == "build" then
-            self:_prepare()
-        end
-        local checked = self:_check_unlocked()
-        if checked and load then
-            self:_load_unlocked()
-        end
-        return checked
-    end)
-    if locked then
-        scheduler.co_unlock(lockname)
-    end
-    if not ok then
-        os.raise(result_or_errors)
-    end
-    return result_or_errors
-end
-
--- do check, we only check it once for all architectures
---
--- @return      true if the toolchain is available
---
-function _instance:check(opt)
-    if opt and opt.prepare then
-        return self:_initialize(false, opt)
-    end
-    return self:_check_unlocked()
-end
-
 -- do load manually, it will call on_load()
 function _instance:load()
-    return self:_initialize(true)
+    self:_load()
 end
 
 -- check cross toolchain
@@ -489,26 +457,38 @@ function _instance:_on_load()
     return on_load
 end
 
--- do load without taking the initialization lock, @note we need to load it repeatly for each architectures
-function _instance:_load_unlocked()
+-- do load, @note we need to load it repeatly for each architectures
+function _instance:_load()
     local info = self:info()
-    if not info:get("__loaded") and not info:get("__loading") then
+    if info:get("__loaded") or info:get("__loading") then
+        return true
+    end
+    local build = option.taskname() == "build"
+    if not build and not self:_is_checked() then
+        return false
+    end
+    local locked = build and scheduler.co_running() ~= nil
+    local lockname = "toolchain_load_" .. self:cachekey()
+    if locked then
+        scheduler.co_lock(lockname)
+    end
+    if not info:get("__loaded") and self:check({prepare = build}) then
         local on_load = self:_on_load()
         if on_load then
             info:set("__loading", true)
             local ok, errors = sandbox.call(on_load, self)
             info:set("__loading", false)
             if not ok then
+                if locked then scheduler.co_unlock(lockname) end
                 os.raise(errors)
             end
         end
         info:set("__loaded", true)
     end
-end
-
--- lazy initialize on first load/use
-function _instance:_load()
-    return self:_initialize(true)
+    if locked then
+        scheduler.co_unlock(lockname)
+    end
+    return info:get("__loaded") == true
 end
 
 -- is loaded?
@@ -1002,6 +982,14 @@ function toolchain.tool(toolchains, toolkind, opt)
         program = cache:get2(cachekey, "program")
         toolname = cache:get2(cachekey, "toolname")
         toolchain_info = cache:get2(cachekey, "toolchain_info")
+        if program and toolchain_info then
+            for _, toolchain_inst in ipairs(toolchains) do
+                if toolchain_inst:cachekey() == toolchain_info.cachekey then
+                    toolchain_inst:load()
+                    break
+                end
+            end
+        end
     end
 
     -- get program from toolchains
@@ -1059,7 +1047,6 @@ function toolchain.toolconfig(toolchains, name, opt)
     local toolconfig = cache:get2(cachekey, name)
     if toolconfig == nil then
         for _, toolchain_inst in ipairs(toolchains) do
-            -- reading tool configuration must not initialize unused candidate toolchains
             local values = toolchain_inst:get(name, {load = false})
             if values then
                 toolconfig = toolconfig or {}

@@ -55,9 +55,7 @@ target("unused")
     set_configdir(path.join(os.projectdir(), ".patch-unused-config"))
     add_configfiles("fixtures/unused.in", {onlycopy = true})
     on_config(function (target)
-        local bad = assert(target:toolchain("bad"), "bad toolchain missing")
-        assert(bad:get("patch.check_state", {load = false}) == "config",
-            "unused target was configured before its toolchain was checked")
+        assert(target:toolchain("bad"), "bad toolchain missing")
         -- make source discovery observable if this unrelated target is configured
         target:sourcefiles()
         io.writefile(_marker("config-unused"), "1")

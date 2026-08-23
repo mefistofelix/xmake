@@ -1329,7 +1329,8 @@ end
 
 -- is enabled?
 function _instance:is_enabled()
-    return self:get("enabled") ~= false
+    return self:get("enabled") ~= false and
+           (not baseoption.get("__build_selected") or self:data("__build_selected") == true)
 end
 
 -- is rebuilt?
@@ -2754,8 +2755,7 @@ function _instance:toolchains()
             -- we always need a standalone toolchain
             -- because we maybe only set partial toolchains in target, e.g. nasm toolchain
             --
-            -- Keep all standalone candidates here. They are checked lazily on first real
-            -- tool use, so unavailable candidates can be skipped without an eager platform check.
+            -- Keep platform standalone candidates lazy and ordered; first real use detects them.
             if not has_standalone then
                 for _, toolchain_inst in ipairs(self:platform():toolchains()) do
                     if toolchain_inst:is_standalone() then
@@ -2764,12 +2764,7 @@ function _instance:toolchains()
                 end
             end
         elseif self:is_phony() and not self:get("toolset") then
-            -- phony targets that do not need tools must not initialize a host compiler toolchain
-            local toolchain_inst, errors = toolchain.load("none", {arch = self:arch(), plat = self:plat()})
-            if not toolchain_inst then
-                os.raise(errors)
-            end
-            toolchains = {toolchain_inst}
+            toolchains = {assert(toolchain.load("none", {arch = self:arch(), plat = self:plat()}))}
         else
             toolchains = self:platform():toolchains()
         end

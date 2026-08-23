@@ -196,9 +196,8 @@ end
 --    add_rules("@zlib/test")
 -- @endcode
 --
-function sandbox_core_project._load_package_rules_for_targets(targets)
-    targets = targets or project.ordertargets()
-    for _, target in ipairs(table.wrap(targets)) do
+function sandbox_core_project._load_package_rules_for_targets()
+    for _, target in ipairs(table.wrap(project.ordertargets())) do
         if target:is_enabled() then
             sandbox_core_project._load_package_rules_for_target(target)
         end
@@ -207,8 +206,7 @@ end
 
 -- load project targets
 function sandbox_core_project.load_targets(opt)
-    opt = opt or {}
-    sandbox_core_project._load_package_rules_for_targets(opt.targets)
+    sandbox_core_project._load_package_rules_for_targets()
     sandbox_core_project._config_targets(opt)
 end
 

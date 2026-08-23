@@ -121,6 +121,18 @@ During an actual build, first real toolchain use must follow lazily:
 
 `on_toolchain_prepare` is build-driven: merely loading the project or running standalone `xmake config` must not execute it.
 
+### Technical model and upstream change points
+
+Keep this patch architectural rather than procedural: Xmake's configuration/platform layer describes *which* toolchains are candidates, while the existing toolchain use path decides *when* a candidate must actually be detected and loaded.
+
+- `xmake/core/platform/platform.lua`, especially `_instance:check()` and `_instance:toolchains()`, is the platform/candidate-selection boundary. Platform configuration may resolve the platform name, explicit toolchain name, and ordered platform toolchain candidate names/fullnames, and persist that priority list in the existing platform toolchain config key. It must **not** call `toolchain:check()`, probe executables/SDKs, reject an unavailable candidate, or otherwise perform detection. Loading a toolchain descriptor to know its declared kind/name is acceptable; detecting whether the toolchain exists on the machine is not.
+- `xmake/core/tool/toolchain.lua` is the first-real-use boundary. The smallest shared path that already feeds actual tool use/load must perform the build-only sequence `on_toolchain_prepare -> check -> load -> use`. Put the lazy boundary here rather than duplicating it in targets, options, platforms, rules, or actions. `on_toolchain_prepare` runs immediately before the normal Xmake detection/check for that runtime toolchain instance, so it may materialize SDK layouts, executables, directories, environment inputs, or descriptor changes that the normal checker then observes.
+- Existing Xmake `check()`, `load()`, localcache/memcache, depend files, and dirty/rebuild semantics remain authoritative. The patch should route execution into those mechanisms at the correct time, not replace them and not clear/rewrite their caches manually.
+- `xmake/core/project/target.lua` should contain only target-specific policy that cannot live in the generic toolchain layer. In particular, a phony target with no toolset/compiler need may select the inert `none` toolchain; ordinary targets should otherwise expose candidate toolchains and let the generic first-use path choose/detect them lazily.
+- `xmake/actions/config/main.lua` must not perform target/platform toolchain detection. Configuration may preserve candidate metadata and normal project configuration behavior, but a plain `xmake config` is not a build and therefore must not run `on_toolchain_prepare` or detect host compilers merely because a target/toolchain is declared.
+- Build target selection remains separate from toolchain detection. A build may restrict configuration work to its selected target/dependency closure so unrelated target callbacks/configfiles/source discovery remain inert, but this must reuse existing Xmake selection/`is_enabled()`/dependency traversal mechanisms with the least plumbing possible; do not pass new target lists through multiple project/config layers when an existing selection boundary can express the same thing.
+- The implementation must remain small and concentrated. Prefer changing the existing platform candidate-selection function and the existing generic toolchain first-use function over adding parallel lifecycle subsystems or broad option propagation.
+
 Preserve these invariants:
 
 - build-driven configuration is limited to the selected target/dependency closure;
@@ -133,17 +145,19 @@ Preserve these invariants:
 - phony targets needing no compiler use the inert `none` fallback;
 - standalone `xmake config` keeps normal all-target semantics and does not run build-only `on_toolchain_prepare` hooks.
 
-Current upstream Lua files for this patch:
+Keep the final upstream footprint synchronized with the implementation. The intended core change points are `xmake/core/platform/platform.lua`, `xmake/core/tool/toolchain.lua`, and only the minimum target/config/build files strictly required for phony `none` fallback and selected-build scoping. If an implementation starts modifying helper layers merely to transport state between those points, first look for an existing Xmake selection or lifecycle mechanism that removes those edits.
 
-- `xmake/actions/build/main.lua`
-- `xmake/actions/config/configfiles.lua`
-- `xmake/actions/config/main.lua`
-- `xmake/core/project/project.lua`
-- `xmake/core/project/target.lua`
-- `xmake/core/sandbox/modules/import/core/project/project.lua`
-- `xmake/core/tool/toolchain.lua`
-- `xmake/modules/private/utils/target.lua`
-- `xmake/toolchains/none/xmake.lua`
+Current upstream files for this milestone are intentionally limited to:
+
+- `xmake/actions/build/main.lua` - tells the nested config which build roots/group are active;
+- `xmake/actions/config/main.lua` - marks only that root/dependency closure for the duration of build-driven config and performs no toolchain detection;
+- `xmake/core/platform/platform.lua` - stores only ordered candidate toolchain names in the existing platform config key;
+- `xmake/core/project/project.lua` - exposes the global `on_toolchain_prepare` project API;
+- `xmake/core/project/target.lua` - reuses `is_enabled()` for temporary selected-build filtering, keeps platform standalone candidates lazy, and maps tool-less phony targets to `none`;
+- `xmake/core/tool/toolchain.lua` - owns the single serialized first-use `prepare -> check -> load` boundary and avoids activating candidates from `toolconfig()`;
+- `xmake/toolchains/none/xmake.lua` - minimal inert standalone phony fallback.
+
+Do not reintroduce edits to `actions/config/configfiles.lua`, the sandbox project loader, or `modules/private/utils/target.lua` merely to carry selected target lists: their existing `target:is_enabled()` filtering is sufficient.
 
 ## 4. `before_sources` target hook
 

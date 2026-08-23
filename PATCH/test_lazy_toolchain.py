@@ -60,9 +60,7 @@ def main() -> None:
         # Standalone config deliberately keeps all-target semantics. Use the good fake as
         # the platform toolchain so this test remains independent of MSVC/Visual Studio.
         clean()
-        env = os.environ.copy()
-        env["PATCH_ALLOW_BAD"] = "1"
-        run(exe, "f", "-c", "--toolchain=good", env=env)
+        run(exe, "f", "-c", "--toolchain=good")
         for name in ("config-dep", "config-app", "config-unused"):
             require(name)
         forbid("prepare-good")
