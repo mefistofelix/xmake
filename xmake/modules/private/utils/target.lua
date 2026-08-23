@@ -162,16 +162,9 @@ function check_target_toolchains()
             -- `target/set_plat()` and target:toolchains() need it
             target:platform():check()
 
-            -- check target toolchains next
-            local target_toolchains = target:get("toolchains")
-            if target_toolchains then
-                target_toolchains = hashset.from(table.wrap(target_toolchains))
-                for _, toolchain_inst in pairs(target:toolchains()) do
-                    -- check toolchains for `target/set_toolchains()`
-                    if not toolchain_inst:check() and target_toolchains:has(toolchain_inst:name()) then
-                        raise("toolchain(\"%s\"): not found!", toolchain_inst:name())
-                    end
-                end
+            -- load target toolchain descriptors only; detection is lazy
+            if target:get("toolchains") then
+                target:toolchains()
             end
         elseif not target:get("toolset") then
             -- we only abort it when we know that toolchains of platform and target do not found

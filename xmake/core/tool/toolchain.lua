@@ -39,7 +39,6 @@ local memcache       = require("cache/memcache")
 local localcache     = require("cache/localcache")
 local language       = require("language/language")
 local sandbox        = require("sandbox/sandbox")
-local scheduler      = require("sandbox/modules/import/core/base/scheduler")
 local sandbox_module = require("sandbox/modules/import/core/sandbox/module")
 
 -- new an instance
@@ -274,10 +273,9 @@ end
 -- @return          the program path, the tool name
 --
 function _instance:tool(toolkind)
-    if not self:_load() then
-        return
-    end
-    local toolpaths = self:get("toolset." .. toolkind, {load = false})
+    -- ensure to do check/load for initializing toolset first
+    self:_load()
+    local toolpaths = self:get("toolset." .. toolkind)
     if toolpaths then
         for _, toolpath in ipairs(table.wrap(toolpaths)) do
             local program, toolname = self:_checktool(toolkind, toolpath)
@@ -346,12 +344,14 @@ function _instance:configs_save()
     utils.warning("toolchain:configs_save() is deprecated, please remove it.")
 end
 
--- run the project-level prepare hook before build-time detection
-function _instance:_prepare()
+-- do check, we only check it once for all architectures
+--
+-- @return      true if the toolchain is available
+--
+function _instance:check()
     local info = self:info()
     if not info:get("__prepared") then
-        local project = require("project/project")
-        local on_prepare = project.get("toolchain_prepare")
+        local on_prepare = require("project/project").get("toolchain_prepare")
         if on_prepare then
             local ok, errors = sandbox.call(on_prepare, self)
             if not ok then
@@ -359,16 +359,6 @@ function _instance:_prepare()
             end
         end
         info:set("__prepared", true)
-    end
-end
-
--- do check, we only check it once for all architectures
---
--- @return      true if the toolchain is available
---
-function _instance:check(opt)
-    if opt and opt.prepare then
-        self:_prepare()
     end
     local checked = self:config("__checked")
     if checked == nil then
@@ -459,36 +449,22 @@ end
 
 -- do load, @note we need to load it repeatly for each architectures
 function _instance:_load()
+    if not self:check() then
+        return
+    end
     local info = self:info()
-    if info:get("__loaded") or info:get("__loading") then
-        return true
-    end
-    local build = option.taskname() == "build"
-    if not build and not self:_is_checked() then
-        return false
-    end
-    local locked = build and scheduler.co_running() ~= nil
-    local lockname = "toolchain_load_" .. self:cachekey()
-    if locked then
-        scheduler.co_lock(lockname)
-    end
-    if not info:get("__loaded") and self:check({prepare = build}) then
+    if not info:get("__loaded") and not info:get("__loading") then
         local on_load = self:_on_load()
         if on_load then
             info:set("__loading", true)
             local ok, errors = sandbox.call(on_load, self)
             info:set("__loading", false)
             if not ok then
-                if locked then scheduler.co_unlock(lockname) end
                 os.raise(errors)
             end
         end
         info:set("__loaded", true)
     end
-    if locked then
-        scheduler.co_unlock(lockname)
-    end
-    return info:get("__loaded") == true
 end
 
 -- is loaded?
@@ -982,14 +958,6 @@ function toolchain.tool(toolchains, toolkind, opt)
         program = cache:get2(cachekey, "program")
         toolname = cache:get2(cachekey, "toolname")
         toolchain_info = cache:get2(cachekey, "toolchain_info")
-        if program and toolchain_info then
-            for _, toolchain_inst in ipairs(toolchains) do
-                if toolchain_inst:cachekey() == toolchain_info.cachekey then
-                    toolchain_inst:load()
-                    break
-                end
-            end
-        end
     end
 
     -- get program from toolchains
@@ -1047,7 +1015,10 @@ function toolchain.toolconfig(toolchains, name, opt)
     local toolconfig = cache:get2(cachekey, name)
     if toolconfig == nil then
         for _, toolchain_inst in ipairs(toolchains) do
-            local values = toolchain_inst:get(name, {load = false})
+            if not toolchain_inst:_is_checked() then
+                utils.warning("we cannot get toolconfig(%s) in toolchain(%s) with %s/%s, because it has been not checked yet!", name, toolchain_inst:name(), toolchain_inst:plat(), toolchain_inst:arch())
+            end
+            local values = toolchain_inst:get(name)
             if values then
                 toolconfig = toolconfig or {}
                 table.join2(toolconfig, values)

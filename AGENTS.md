@@ -44,11 +44,26 @@ For every meaningful milestone, complete this sequence **before starting the nex
 5. Download or refresh the latest official Windows x64 bundled Xmake release executable if the current milestone has not yet been rebundled from that release base.
 6. Rebundle the current source tree with `PATCH/xmake_rebundle.py`.
 7. Run the full patch suite with the newly rebundled `xmake.exe` itself, without `XMAKE_PROGRAM_DIR`.
-8. Only after those tests pass, commit the milestone to the fork and push it to `origin`.
-9. Do not begin the next meaningful patch milestone until the commit and push for the current one have succeeded.
-10. Update the patch registry below whenever behavior, rationale, important decisions, or modified upstream Lua files change.
+8. After those tests pass, **stop before committing or pushing** and present the milestone to the user for a local review gate. Report exactly which upstream and `PATCH/` files changed, the per-file diff size (added/removed lines, using Git), what each file change does, why each file is necessary, and the total upstream footprint. Call out any file that may still be removable or any logic that may still be simplified.
+9. Do **not** commit or push until the user explicitly confirms that the reviewed local diff is acceptable and authorizes commit/push. A passing test suite is not authorization. Silence, a general request to continue working, or approval of the design is not authorization to publish the current diff.
+10. Before that approval, stay within the same milestone and freely perform additional local simplification/review cycles requested by the user. After each material simplification, rerun the relevant validation and present the updated file/line footprint again. Do not start a different patch milestone while this one is awaiting approval.
+11. Only after explicit user approval, commit the reviewed milestone to the fork and push it to `origin`.
+12. Do not begin the next meaningful patch milestone until the approved commit and push for the current one have succeeded.
+13. Update the patch registry below whenever behavior, rationale, important decisions, or modified upstream Lua files change.
 
-A source edit without its tests, fresh rebundle, rebundled-executable validation, commit, and push is an **unfinished milestone** and must not be followed by implementation of another meaningful patch feature.
+A source edit without its tests, fresh rebundle, rebundled-executable validation, **user review/approval**, commit, and push is an **unfinished milestone** and must not be followed by implementation of another meaningful patch feature.
+
+### Mandatory pre-commit review gate
+
+This gate applies to every future commit that contains project implementation changes, test changes, or patch documentation tied to a milestone.
+
+- Never run `git commit` or `git push` for a milestone before the user has reviewed the current local diff summary and explicitly authorized publication.
+- The review summary must be based on the actual current Git diff, not memory. At minimum report `git diff --stat`/`--numstat`-equivalent information and explain each changed file.
+- Separate **upstream Xmake files** from **project-owned `PATCH/`/documentation files** so patch invasiveness is immediately visible.
+- For every upstream file, explain the exact upstream function/lifecycle boundary being changed and why that behavior cannot be achieved by reusing an already modified boundary instead.
+- Highlight deletions as well as additions: a large negative diff may be desirable when it removes upstream eager behavior, but it still needs an explanation.
+- If the user questions the footprint, do not defend the current implementation by default. Re-open the upstream source and look for a smaller existing lifecycle/selection boundary, then iterate locally and show the new footprint.
+- Explicit approval is scoped to the exact reviewed state. If code changes materially after approval, present the updated diff again and obtain fresh approval before committing/pushing.
 
 If priorities change and another patch must be implemented before the current unfinished milestone, **do not leave the current work half-applied**. Before switching milestones:
 
@@ -64,7 +79,7 @@ If priorities change and another patch must be implemented before the current un
 - Tests must be self-contained and must not require Visual Studio, MSVC, GCC, Clang, SDKs, package managers, network access, or any other developer tool to be installed on the machine running the suite.
 - When a compiler/tool is logically needed by a scenario, provide a patch-local custom rule/toolchain/fake executable or other deterministic fixture under `PATCH/` that drives the real Xmake code path without depending on host-installed toolchains.
 - Do not change source extensions, target kinds, or test semantics solely to bypass Xmake toolchain/configuration behavior that the project is supposed to patch.
-- If an exact regression test is blocked by eager initialization of an unavailable host toolchain, treat that as evidence that the **lazy toolchain initialization / selected build graph patch must be implemented first**. Do not work around that failure in the test.
+- If an exact regression test is blocked by eager initialization of an unavailable host toolchain, treat that as evidence that the **lazy toolchain initialization patch must be implemented first**. Do not work around that failure in the test.
 - A milestone is complete only when its exact behavioral tests pass with the rebundled executable in a clean environment that does not rely on `XMAKE_PROGRAM_DIR` or host compiler availability.
 - Project callbacks/hooks introduced or exercised by this patch must run in the normal Xmake project/runtime sandbox. The normal `os` sandbox API must be available there, including operations such as `os.mkdir`, `os.run`/`os.runv`, file/path checks, environment access, and the rest of the standard callback `os.*` surface; do not implement a reduced ad-hoc callback environment.
 - Do **not** add ad-hoc cache invalidation, timestamp touching, forced rechecks, or private cache resets to make these patches work. Hook into Xmake's existing lazy lifecycle and dependency/cache machinery and let Xmake's normal `depend`, cache, dirtiness, and rebuild semantics decide when work is repeated.
@@ -111,53 +126,70 @@ Preserve these invariants:
 - old records containing raw compiler dependency payloads remain readable and are materialized on load;
 - non-compiler dependency records and downstream behavior remain unchanged.
 
-## 3. Lazy toolchain initialization and selected build graph
+## 3. Lazy toolchain initialization
 
-**Goal:** targets/toolchains outside the selected build closure must stay inert.
+**Goal:** declaring/configuring a toolchain must not detect it. Detection happens only at the first real use of that runtime toolchain instance.
 
-During an actual build, first real toolchain use must follow lazily:
+The required order at first real use is:
 
 `on_toolchain_prepare -> check -> load -> use`
 
-`on_toolchain_prepare` is build-driven: merely loading the project or running standalone `xmake config` must not execute it.
+A plain `xmake config` may keep all of upstream Xmake's normal target/configuration traversal. This patch does **not** track selected build roots, target closures, dependency graphs, or build concurrency, and must not modify `xmake/actions/build/main.lua` or `xmake/actions/config/main.lua` merely to decide which target might later use a toolchain. Laziness belongs to the toolchain object itself.
 
 ### Technical model and upstream change points
 
-Keep this patch architectural rather than procedural: Xmake's configuration/platform layer describes *which* toolchains are candidates, while the existing toolchain use path decides *when* a candidate must actually be detected and loaded.
-
-- `xmake/core/platform/platform.lua`, especially `_instance:check()` and `_instance:toolchains()`, is the platform/candidate-selection boundary. Platform configuration may resolve the platform name, explicit toolchain name, and ordered platform toolchain candidate names/fullnames, and persist that priority list in the existing platform toolchain config key. It must **not** call `toolchain:check()`, probe executables/SDKs, reject an unavailable candidate, or otherwise perform detection. Loading a toolchain descriptor to know its declared kind/name is acceptable; detecting whether the toolchain exists on the machine is not.
-- `xmake/core/tool/toolchain.lua` is the first-real-use boundary. The smallest shared path that already feeds actual tool use/load must perform the build-only sequence `on_toolchain_prepare -> check -> load -> use`. Put the lazy boundary here rather than duplicating it in targets, options, platforms, rules, or actions. `on_toolchain_prepare` runs immediately before the normal Xmake detection/check for that runtime toolchain instance, so it may materialize SDK layouts, executables, directories, environment inputs, or descriptor changes that the normal checker then observes.
-- Existing Xmake `check()`, `load()`, localcache/memcache, depend files, and dirty/rebuild semantics remain authoritative. The patch should route execution into those mechanisms at the correct time, not replace them and not clear/rewrite their caches manually.
-- `xmake/core/project/target.lua` should contain only target-specific policy that cannot live in the generic toolchain layer. In particular, a phony target with no toolset/compiler need may select the inert `none` toolchain; ordinary targets should otherwise expose candidate toolchains and let the generic first-use path choose/detect them lazily.
-- `xmake/actions/config/main.lua` must not perform target/platform toolchain detection. Configuration may preserve candidate metadata and normal project configuration behavior, but a plain `xmake config` is not a build and therefore must not run `on_toolchain_prepare` or detect host compilers merely because a target/toolchain is declared.
-- Build target selection remains separate from toolchain detection. A build may restrict configuration work to its selected target/dependency closure so unrelated target callbacks/configfiles/source discovery remain inert, but this must reuse existing Xmake selection/`is_enabled()`/dependency traversal mechanisms with the least plumbing possible; do not pass new target lists through multiple project/config layers when an existing selection boundary can express the same thing.
-- The implementation must remain small and concentrated. Prefer changing the existing platform candidate-selection function and the existing generic toolchain first-use function over adding parallel lifecycle subsystems or broad option propagation.
+- `xmake/core/platform/platform.lua`, especially `_instance:check()`, is descriptive only. It may load toolchain descriptors and preserve the existing ordered candidate names/fullnames, including explicit standalone-toolchain priority, but it must not call `toolchain:check()`, probe tools/SDKs, discard unavailable candidates, or fail merely because a candidate is not installed.
+- `xmake/modules/private/utils/target.lua::check_target_toolchains()` is the other eager global boundary. It may validate/load declared toolchain descriptors, but it must not call `toolchain:check()` merely because a target declares a toolchain.
+- `xmake/core/tool/toolchain.lua::check()` remains a real Xmake check in every task. The patch only inserts `on_toolchain_prepare` immediately before the first normal check for that runtime instance; it does not special-case `config`.
+- `_load()` must enter the normal `check()` boundary before `on_load()`. This replaces the old assumption that configuration had already checked every toolchain eagerly. `tool()`, `toolconfig()`, rules, options, packages and other callers otherwise retain upstream semantics.
+- Therefore a rule/option that explicitly asks for a tool, dynamic toolchain configuration, or `toolchain:check()` during `xmake config` is a genuine use and may legitimately trigger prepare/detection. A plain config that only loads descriptors and runs ordinary target configuration must not trigger it.
+- `on_toolchain_prepare` runs in the normal project/runtime sandbox immediately before the first real detection attempt for that runtime instance. It may create directories, download/materialize an SDK or executable, run programs, modify environment inputs, or mutate the toolchain descriptor so the normal checker sees the prepared state.
+- Do not add cache invalidation, forced rechecks, timestamps, target-selection state, dependency-graph state, synthetic fallback toolchains, or a new concurrency subsystem. Existing Xmake `__checked`, `__loaded`, `__loading`, localcache/memcache, depend and dirtiness semantics remain authoritative.
 
 Preserve these invariants:
 
-- build-driven configuration is limited to the selected target/dependency closure;
-- unrelated targets do not run `on_config`, toolchain checks, source discovery, or configfile generation;
-- unavailable toolchains on unused targets remain inert;
-- `toolconfig()` does not activate unused candidate toolchains;
-- concurrent users share one serialized initialization boundary;
-- global `on_toolchain_prepare` runs only for a toolchain actually reached by an active build, in the normal project/runtime sandbox, and may materialize files/tools or mutate the descriptor before Xmake's normal toolchain check/use path;
-- toolchain preparation does not manually clear `__checked`, detection caches, or other Xmake cache state; normal Xmake cache semantics remain authoritative;
-- phony targets needing no compiler use the inert `none` fallback;
-- standalone `xmake config` keeps normal all-target semantics and does not run build-only `on_toolchain_prepare` hooks.
+- a banal `xmake config` that does not actually request a toolchain check/load must not run `on_toolchain_prepare`;
+- configuration is allowed to visit unrelated targets exactly as upstream does; descriptor visitation alone must not activate their toolchains;
+- an unavailable toolchain on a target that is never really used remains inert even if its descriptor is visited;
+- any genuine `toolchain:check()` remains a real check and runs `on_toolchain_prepare` first, including when a rule/option legitimately requests it during configuration;
+- any `_load()` path enters `check()` before `on_load()`, so actual tool/toolconfig use cannot bypass prepare/detection;
+- no special `config` no-op semantics, target-selection plumbing, ad-hoc invalidation, scheduler/locking logic, synthetic `none`, or cached-tool workaround is introduced by this patch.
 
-Keep the final upstream footprint synchronized with the implementation. The intended core change points are `xmake/core/platform/platform.lua`, `xmake/core/tool/toolchain.lua`, and only the minimum target/config/build files strictly required for phony `none` fallback and selected-build scoping. If an implementation starts modifying helper layers merely to transport state between those points, first look for an existing Xmake selection or lifecycle mechanism that removes those edits.
+The intended upstream footprint for this milestone is exactly four files:
 
-Current upstream files for this milestone are intentionally limited to:
+- `xmake/core/platform/platform.lua` - remove eager platform detection and retain ordered candidate metadata only;
+- `xmake/modules/private/utils/target.lua` - remove eager per-target `toolchain:check()` while retaining descriptor validation;
+- `xmake/core/project/project.lua` - register the global `on_toolchain_prepare` project script API;
+- `xmake/core/tool/toolchain.lua` - run prepare at the normal check boundary and make load enter that boundary before `on_load()`.
 
-- `xmake/actions/build/main.lua` - tells the nested config which build roots/group are active;
-- `xmake/actions/config/main.lua` - marks only that root/dependency closure for the duration of build-driven config and performs no toolchain detection;
-- `xmake/core/platform/platform.lua` - stores only ordered candidate toolchain names in the existing platform config key;
-- `xmake/core/project/project.lua` - exposes the global `on_toolchain_prepare` project API;
-- `xmake/core/project/target.lua` - reuses `is_enabled()` for temporary selected-build filtering, keeps platform standalone candidates lazy, and maps tool-less phony targets to `none`;
-- `xmake/core/tool/toolchain.lua` - owns the single serialized first-use `prepare -> check -> load` boundary and avoids activating candidates from `toolconfig()`;
-- `xmake/toolchains/none/xmake.lua` - minimal inert standalone phony fallback.
+### Reconstruction recipe
 
-Do not reintroduce edits to `actions/config/configfiles.lua`, the sandbox project loader, or `modules/private/utils/target.lua` merely to carry selected target lists: their existing `target:is_enabled()` filtering is sufficient.
+This section is intentionally detailed enough to recreate the patch against a fresh upstream tree without copying the current modified files verbatim.
+
+1. In `xmake/core/platform/platform.lua`, change `_instance:check()` from an eager availability probe into candidate registration only. Remove its scheduler lock/import and the loop that calls `toolchain:check()`, filters unavailable candidates, and collapses standalone candidates. Instead iterate `self:toolchains({all = true})` in its existing order, collect each instance `fullname()`, store that list with `config.set(self:_toolchains_key(), names)`, and return `true`. This preserves platform/explicit-toolchain ordering but records no machine-dependent availability decision.
+2. In `xmake/modules/private/utils/target.lua::check_target_toolchains()`, keep the existing project/target traversal and keep `target:platform():check()` because target/platform metadata still has to be resolved. For targets with explicit `set_toolchains()`, call `target:toolchains()` only to load/validate their descriptors. Remove the loop that invokes `toolchain_inst:check()` and raises `toolchain(...): not found!` during this global configuration pass. Descriptor-not-found errors still happen when the descriptor itself cannot be loaded; machine availability is deferred.
+3. In `xmake/core/project/project.lua::project.apis()`, register root project script API `on_toolchain_prepare`. It is a project-level callback, not a target/rule callback, because it prepares a runtime toolchain instance independently of which consumer first needs it.
+4. In `xmake/core/tool/toolchain.lua::_instance:check()`, keep the existing `__checked` cache and normal `_on_check()` implementation. Immediately before reading/running the normal check, run the project `toolchain_prepare` script once per runtime instance, guarded by an in-memory `__prepared` field on `self:info()`. Invoke it through `sandbox.call(on_prepare, self)` and propagate errors normally. Do not clear or rewrite `__checked`; preparation must occur before the first ordinary detector observes the filesystem/environment.
+5. In `xmake/core/tool/toolchain.lua::_instance:_load()`, replace the old warning-only assumption that configuration has already checked the toolchain with `if not self:check() then return end`, then leave the existing `__loaded`/`__loading` and `on_load` logic intact. This is what makes every genuine load path enter the same prepare/check boundary.
+6. In `xmake/core/tool/toolchain.lua::_instance:tool()`, remove the obsolete warning/comment claiming an unchecked toolchain cannot be checked there. Keep the normal `_load()` call; `_load()` now performs the check correctly. Do not add new logic to `tool()`, `toolconfig()`, compiler/linker, rules, options, packages, action mains, or target selection.
+
+The rationale is that **`check()` is the semantic availability boundary already used throughout Xmake**. It is called not only by final compiler execution but also legitimately by package tools, SDK detection, generators, rules and options. Therefore `check()` must remain real in every task, including `config`. What must disappear is only speculative/global checking performed before any consumer actually asks for availability. Likewise `on_load()` may populate `toolset`, flags, include/link directories, run environments and callbacks, so it must retain normal upstream semantics rather than being globally suppressed during configuration.
+
+Do not recreate any earlier discarded design: no selected-build closure, `__build_selected`, edits to `actions/build/main.lua` or `actions/config/main.lua`, task-name-based `config` no-ops, `{load = false}` changes to generic `toolconfig()`, synthetic `none` toolchains, scheduler locks, cache invalidation, or special cached-tool lifecycle workaround. Those approaches were investigated and removed because they either duplicated Xmake lifecycle state or changed legitimate Xmake configuration semantics.
+
+### Required regression proof
+
+`PATCH/xmake.lua` and `PATCH/test_lazy_toolchain.py` are the executable specification. Keep two custom standalone descriptors: `good`, whose `on_check` requires the prepare marker/state and whose `on_load` exposes a fake `cc` using `os.programfile()`, and `bad`, whose `on_check`/`on_load` unconditionally fail. The global prepare callback must exercise the normal sandbox (`os.mkdir`, `os.runv`, file writing) and mark which toolchain was prepared.
+
+The minimum regression sequence is:
+
+- clean patch markers/cache, run a banal `xmake f -c --toolchain=good`; normal target `on_config` callbacks may run and both `good`/`bad` descriptors may be visited, but neither `prepare-good` nor `prepare-bad` may appear;
+- without relying on a host compiler, run `xmake build app`; first `target:tool("cc")` must cause `good` to execute `prepare -> on_check -> on_load -> tool`, while `bad` remains untouched;
+- the test must fail immediately if `bad` is eagerly checked/loaded or if `good` reaches `on_check` before prepare.
+
+This proves the intended distinction: **descriptor/configuration traversal is inert; an actual call into Xmake's normal toolchain availability/load path is real use and may trigger preparation, even if that legitimate use happens during a configuration task.**
+
+Do not reintroduce selected-target plumbing in action/config files for this feature. If future patches need build-selection information (for example `before_sources`), solve that separately at the lifecycle point where that feature is actually invoked.
 
 ## 4. `before_sources` target hook
 
@@ -173,7 +205,7 @@ Preserve these invariants:
 
 - `before_sources` is build-driven and lazy: merely loading/configuring a target does not run it;
 - it is triggered only when the active build is actually about to resolve that target's `add_files()` source list;
-- the target's standalone toolchain finishes build-only `on_toolchain_prepare` and `check()` first, so `before_sources` can use files/tools materialized by toolchain preparation;
+- the target's actually used standalone toolchain reaches the normal `on_toolchain_prepare -> check` boundary first, so `before_sources` can use files/tools materialized by toolchain preparation;
 - `before_sources` may itself materialize/download/generate source inputs for that target;
 - `before_sources` runs immediately before that build-driven source glob resolution/materialization;
 - files created there are visible to `add_files()` and its materialization callback in the same invocation;

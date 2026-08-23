@@ -35,7 +35,7 @@ import("configfiles", {alias = "generate_configfiles"})
 import("private.action.require.register", {alias = "register_packages"})
 import("private.action.require.install", {alias = "install_packages"})
 import("private.service.remote_build.action", {alias = "remote_build_action"})
-import("private.action.utils", {alias = "action_utils"})
+import("private.utils.target", {alias = "target_utils"})
 
 -- filter option
 function _option_filter(name)
@@ -366,23 +366,16 @@ force to build in current directory via run `xmake -P .`]], os.projectdir())
             end
         end
 
-        -- Build uses the selected target/dependency closure only. The temporary option
-        -- makes the existing target:is_enabled() filters do the rest of the work.
-        if opt.build then
-            local roots = action_utils.get_targets(opt.targetnames, {
-                group_pattern = opt.group_pattern, all = opt.all})
-            for _, target in ipairs(roots) do
-                target:data_set("__build_selected", true)
-                for _, dep in ipairs(target:orderdeps()) do
-                    dep:data_set("__build_selected", true)
-                end
-            end
-            option.set("__build_selected", true)
-        else
-            _check_targets()
+        -- check target and ensure to load all targets, @note we must load targets after installing required packages,
+        -- otherwise has_package() will be invalid.
+        _check_targets()
+
+        -- check target toolchains
+        if recheck then
+            target_utils.check_target_toolchains()
         end
 
-        -- load targets; toolchains are detected only on real use
+        -- load targets
         project.load_targets({recheck = recheck})
 
         -- update the config files

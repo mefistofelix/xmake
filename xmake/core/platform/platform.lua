@@ -249,11 +249,13 @@ function _instance:data_add(name, data)
     self._DATA[name] = table.unwrap(table.join(self._DATA[name] or {}, data))
 end
 
--- cache toolchain names only; detection is deferred to real use
+-- cache the ordered toolchain candidates without detecting them
 function _instance:check()
-    local names = table.wrap(config.get(self:is_host() and "toolchain_host" or "toolchain"))
-    table.join2(names, self._INFO:get("toolchains"))
-    config.set(self:_toolchains_key(), table.unique(names))
+    local names = {}
+    for _, toolchain_inst in ipairs(self:toolchains({all = true})) do
+        table.insert(names, toolchain_inst:fullname())
+    end
+    config.set(self:_toolchains_key(), names)
     return true
 end
 

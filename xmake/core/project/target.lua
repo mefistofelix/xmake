@@ -1329,8 +1329,7 @@ end
 
 -- is enabled?
 function _instance:is_enabled()
-    return self:get("enabled") ~= false and
-           (not baseoption.get("__build_selected") or self:data("__build_selected") == true)
+    return self:get("enabled") ~= false
 end
 
 -- is rebuilt?
@@ -2755,16 +2754,16 @@ function _instance:toolchains()
             -- we always need a standalone toolchain
             -- because we maybe only set partial toolchains in target, e.g. nasm toolchain
             --
-            -- Keep platform standalone candidates lazy and ordered; first real use detects them.
+            -- @note platform has been checked in config/_check_target_toolchains
             if not has_standalone then
                 for _, toolchain_inst in ipairs(self:platform():toolchains()) do
                     if toolchain_inst:is_standalone() then
                         table.insert(toolchains, toolchain_inst)
+                        has_standalone = true
+                        break
                     end
                 end
             end
-        elseif self:is_phony() and not self:get("toolset") then
-            toolchains = {assert(toolchain.load("none", {arch = self:arch(), plat = self:plat()}))}
         else
             toolchains = self:platform():toolchains()
         end
@@ -2828,7 +2827,7 @@ function _instance:toolconfig(name)
     return toolchain.toolconfig(self:toolchains(), name, {cachekey = "target_" .. self:fullname(), plat = self:plat(), arch = self:arch(),
                                                           after_get = function(toolchain_inst)
         -- get flags from target.on_xxflags()
-        local script = toolchain_inst:get("target.on_" .. name, {load = false})
+        local script = toolchain_inst:get("target.on_" .. name)
         if type(script) == "function" then
             local ok, result_or_errors = utils.trycall(script, nil, self)
             if ok then
