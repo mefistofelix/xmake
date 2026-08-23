@@ -2754,16 +2754,22 @@ function _instance:toolchains()
             -- we always need a standalone toolchain
             -- because we maybe only set partial toolchains in target, e.g. nasm toolchain
             --
-            -- @note platform has been checked in config/_check_target_toolchains
+            -- Keep all standalone candidates here. They are checked lazily on first real
+            -- tool use, so unavailable candidates can be skipped without an eager platform check.
             if not has_standalone then
                 for _, toolchain_inst in ipairs(self:platform():toolchains()) do
                     if toolchain_inst:is_standalone() then
                         table.insert(toolchains, toolchain_inst)
-                        has_standalone = true
-                        break
                     end
                 end
             end
+        elseif self:is_phony() and not self:get("toolset") then
+            -- phony targets that do not need tools must not initialize a host compiler toolchain
+            local toolchain_inst, errors = toolchain.load("none", {arch = self:arch(), plat = self:plat()})
+            if not toolchain_inst then
+                os.raise(errors)
+            end
+            toolchains = {toolchain_inst}
         else
             toolchains = self:platform():toolchains()
         end
@@ -2827,7 +2833,7 @@ function _instance:toolconfig(name)
     return toolchain.toolconfig(self:toolchains(), name, {cachekey = "target_" .. self:fullname(), plat = self:plat(), arch = self:arch(),
                                                           after_get = function(toolchain_inst)
         -- get flags from target.on_xxflags()
-        local script = toolchain_inst:get("target.on_" .. name)
+        local script = toolchain_inst:get("target.on_" .. name, {load = false})
         if type(script) == "function" then
             local ok, result_or_errors = utils.trycall(script, nil, self)
             if ok then

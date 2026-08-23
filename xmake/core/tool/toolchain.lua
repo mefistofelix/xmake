@@ -39,6 +39,7 @@ local memcache       = require("cache/memcache")
 local localcache     = require("cache/localcache")
 local language       = require("language/language")
 local sandbox        = require("sandbox/sandbox")
+local scheduler      = require("sandbox/modules/import/core/base/scheduler")
 local sandbox_module = require("sandbox/modules/import/core/sandbox/module")
 
 -- new an instance
@@ -197,8 +198,7 @@ function _instance:get(name, opt)
     end
 
     -- lazy loading toolchain
-    if opt.load ~= false then
-        self:_load()
+    if opt.load ~= false and self:_load() then
         return self:info():get(name)
     end
 end
@@ -273,13 +273,11 @@ end
 -- @return          the program path, the tool name
 --
 function _instance:tool(toolkind)
-    if not self:_is_checked() then
-        utils.warning("we cannot get tool(%s) in toolchain(%s) with %s/%s, because it has been not checked yet!", toolkind, self:name(), self:plat(), self:arch())
+    -- first real use lazily prepares, checks and loads the toolchain
+    if not self:_load() then
+        return
     end
-    -- ensure to do load for initializing toolset first
-    -- @note we cannot call self:check() here, because it can only be called on config
-    self:_load()
-    local toolpaths = self:get("toolset." .. toolkind)
+    local toolpaths = self:get("toolset." .. toolkind, {load = false})
     if toolpaths then
         for _, toolpath in ipairs(table.wrap(toolpaths)) do
             local program, toolname = self:_checktool(toolkind, toolpath)
@@ -348,11 +346,24 @@ function _instance:configs_save()
     utils.warning("toolchain:configs_save() is deprecated, please remove it.")
 end
 
--- do check, we only check it once for all architectures
---
--- @return      true if the toolchain is available
---
-function _instance:check()
+-- run the project-level prepare hook once per runtime toolchain instance
+function _instance:_prepare()
+    local info = self:info()
+    if not info:get("__prepared") then
+        local project = require("project/project")
+        local on_prepare = project.get("toolchain_prepare")
+        if on_prepare then
+            local ok, errors = sandbox.call(on_prepare, self)
+            if not ok then
+                os.raise(errors)
+            end
+        end
+        info:set("__prepared", true)
+    end
+end
+
+-- check without taking the initialization lock
+function _instance:_check_unlocked()
     local checked = self:config("__checked")
     if checked == nil then
         local on_check = self:_on_check()
@@ -373,9 +384,41 @@ function _instance:check()
     return checked
 end
 
+-- serialize prepare/check/load so concurrent first users share one boundary
+function _instance:_initialize(load)
+    local lockname = "toolchain_init_" .. (self:cachekey() or tostring(self))
+    local locked = scheduler.co_running() ~= nil
+    if locked then
+        scheduler.co_lock(lockname)
+    end
+    local ok, result_or_errors = utils.trycall(function ()
+        self:_prepare()
+        local checked = self:_check_unlocked()
+        if checked and load then
+            self:_load_unlocked()
+        end
+        return checked
+    end)
+    if locked then
+        scheduler.co_unlock(lockname)
+    end
+    if not ok then
+        os.raise(result_or_errors)
+    end
+    return result_or_errors
+end
+
+-- do check, we only check it once for all architectures
+--
+-- @return      true if the toolchain is available
+--
+function _instance:check()
+    return self:_initialize(false)
+end
+
 -- do load manually, it will call on_load()
 function _instance:load()
-    self:_load()
+    return self:_initialize(true)
 end
 
 -- check cross toolchain
@@ -440,11 +483,8 @@ function _instance:_on_load()
     return on_load
 end
 
--- do load, @note we need to load it repeatly for each architectures
-function _instance:_load()
-    if not self:_is_checked() then
-        utils.warning("we cannot load toolchain(%s), because it has been not checked yet!", self:name(), self:plat(), self:arch())
-    end
+-- do load without taking the initialization lock, @note we need to load it repeatly for each architectures
+function _instance:_load_unlocked()
     local info = self:info()
     if not info:get("__loaded") and not info:get("__loading") then
         local on_load = self:_on_load()
@@ -458,6 +498,11 @@ function _instance:_load()
         end
         info:set("__loaded", true)
     end
+end
+
+-- lazy initialize on first load/use
+function _instance:_load()
+    return self:_initialize(true)
 end
 
 -- is loaded?
@@ -1008,10 +1053,8 @@ function toolchain.toolconfig(toolchains, name, opt)
     local toolconfig = cache:get2(cachekey, name)
     if toolconfig == nil then
         for _, toolchain_inst in ipairs(toolchains) do
-            if not toolchain_inst:_is_checked() then
-                utils.warning("we cannot get toolconfig(%s) in toolchain(%s) with %s/%s, because it has been not checked yet!", name, toolchain_inst:name(), toolchain_inst:plat(), toolchain_inst:arch())
-            end
-            local values = toolchain_inst:get(name)
+            -- reading tool configuration must not initialize unused candidate toolchains
+            local values = toolchain_inst:get(name, {load = false})
             if values then
                 toolconfig = toolconfig or {}
                 table.join2(toolconfig, values)

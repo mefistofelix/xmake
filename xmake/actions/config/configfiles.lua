@@ -28,9 +28,9 @@ import("core.platform.platform")
 import("lib.detect.find_tool")
 
 -- get all configuration files
-function _get_configfiles()
+function _get_configfiles(targets)
     local configfiles = {}
-    for _, target in table.orderpairs(project.targets()) do
+    for _, target in table.orderpairs(targets or project.targets()) do
         if target:is_enabled() then
 
             -- get configuration files for target
@@ -376,7 +376,7 @@ function main(opt)
     local oldir = os.cd(project.directory())
 
     -- generate all configuration files
-    local configfiles = _get_configfiles()
+    local configfiles = _get_configfiles(opt.targets)
     for dstfile, srcinfo in pairs(configfiles) do
         depend.on_changed(function ()
             _generate_configfile(srcinfo.srcfile, dstfile, srcinfo.fileinfo, srcinfo.targets, srcinfo.preprocessors)

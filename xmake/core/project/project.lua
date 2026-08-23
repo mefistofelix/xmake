@@ -818,6 +818,10 @@ function project.apis()
         {
             "set_config"
         }
+    ,   script =
+        {
+            "on_toolchain_prepare"
+        }
     ,   custom =
         {
             -- is_xxx

@@ -128,6 +128,18 @@ Preserve these invariants:
 - phony targets needing no compiler use the inert `none` fallback;
 - standalone `xmake config` keeps normal all-target semantics.
 
+Current upstream Lua files for this patch:
+
+- `xmake/actions/build/main.lua`
+- `xmake/actions/config/configfiles.lua`
+- `xmake/actions/config/main.lua`
+- `xmake/core/project/project.lua`
+- `xmake/core/project/target.lua`
+- `xmake/core/sandbox/modules/import/core/project/project.lua`
+- `xmake/core/tool/toolchain.lua`
+- `xmake/modules/private/utils/target.lua`
+- `xmake/toolchains/none/xmake.lua`
+
 ## 4. `before_sources` target hook
 
 **Goal:** selected targets may prepare files before source discovery/materialization.

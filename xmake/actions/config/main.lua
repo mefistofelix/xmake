@@ -330,8 +330,11 @@ force to build in current directory via run `xmake -P .`]], os.projectdir())
             localcache.save()
         end
 
-        -- check platform
-        instance_plat:check()
+        -- standalone configuration keeps the normal eager platform check.
+        -- Build-driven configuration initializes toolchains lazily from the selected graph.
+        if not opt.build then
+            instance_plat:check()
+        end
 
         -- check project options
         if not trybuild then
@@ -366,20 +369,26 @@ force to build in current directory via run `xmake -P .`]], os.projectdir())
             end
         end
 
-        -- check target and ensure to load all targets, @note we must load targets after installing required packages,
-        -- otherwise has_package() will be invalid.
-        _check_targets()
+        -- Build-driven configuration is restricted to the selected target/dependency closure.
+        -- Standalone `xmake config` keeps the existing all-target semantics.
+        local config_targets
+        if opt.build then
+            config_targets = target_utils.get_target_closure(opt.targetnames, {
+                group_pattern = opt.group_pattern, all = opt.all})
+        else
+            _check_targets()
+        end
 
-        -- check target toolchains
-        if recheck then
+        -- standalone config checks all target toolchains eagerly as before; build mode checks on first use
+        if recheck and not opt.build then
             target_utils.check_target_toolchains()
         end
 
-        -- load targets
-        project.load_targets({recheck = recheck})
+        -- load/configure targets
+        project.load_targets({recheck = recheck, targets = config_targets})
 
-        -- update the config files
-        generate_configfiles({force = recheck})
+        -- update only the selected targets' config files in build mode
+        generate_configfiles({force = recheck, targets = config_targets})
     end
 
     -- dump config

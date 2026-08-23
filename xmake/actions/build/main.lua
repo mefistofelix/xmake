@@ -195,9 +195,10 @@ function main(opt)
     -- lock the whole project
     project.lock()
 
-    -- config it first
+    -- config only the selected build target/dependency closure first
     local targetnames, group_pattern = action_utils.get_targets_and_group()
-    task.run("config", {}, {disable_dump = true})
+    task.run("config", {}, {disable_dump = true, build = true, targetnames = targetnames,
+        group_pattern = group_pattern, all = option.get("all")})
 
     -- check target names
     if targetnames then
