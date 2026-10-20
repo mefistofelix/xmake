@@ -1,3 +1,7 @@
 .xmake/
 .patch-*
 .validate/
+/build/
+/XMake.exe
+/XMake
+/__pycache__/

@@ -11,7 +11,7 @@ param (
 )
 
 & {
-    $LastRelease = "v3.1.0"
+    $LastRelease = "v3.1.2"
     $ErrorActionPreference = 'Stop'
 
     function writeErrorTip($msg) {

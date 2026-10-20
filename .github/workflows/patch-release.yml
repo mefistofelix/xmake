@@ -1,0 +1,105 @@
+name: Patch bundles (Windows and Linux)
+
+on:
+  push:
+    branches: [dev, 'codex/**']
+    tags: ['patched-v*']
+    paths: ['PATCH/**', 'xmake/**', '.github/workflows/patch-release.yml']
+  pull_request:
+    paths: ['PATCH/**', 'xmake/**', '.github/workflows/patch-release.yml']
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Official Xmake release (latest or vMAJOR.MINOR.PATCH)
+        default: latest
+        type: string
+      release_tag:
+        description: Optional patched-v... tag for a draft release
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: patch-bundles-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag || 'latest' }}
+        run: |
+          if [[ "$REQUESTED_TAG" == latest ]]; then
+            tag=$(gh api repos/xmake-io/xmake/releases/latest --jq .tag_name)
+          else
+            tag="$REQUESTED_TAG"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install packaging dependency
+        run: python -m pip install lz4
+      - name: Install Linux runtime dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y libncurses6
+      - name: Rebundle official release and run all patch regressions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: python PATCH/package_release.py --upstream-tag "$UPSTREAM_TAG" --output dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: patch-bundle-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, bundle]
+    if: startsWith(github.ref, 'refs/tags/patched-v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: patch-bundle-*
+          merge-multiple: true
+          path: dist
+      - name: Verify packages and create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          UPSTREAM_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^patched-v[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9._-]*$ ]] || exit 1
+          (cd dist && sha256sum --check ./*.sha256)
+          cp PATCH/RELEASE.md "$RUNNER_TEMP/release-notes.md"
+          printf '\nOfficial native base: %s\nSource commit: %s\n' "$UPSTREAM_TAG" "$GITHUB_SHA" >> "$RUNNER_TEMP/release-notes.md"
+          gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --draft --title "Xmake $UPSTREAM_TAG with patches" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

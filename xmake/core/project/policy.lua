@@ -83,6 +83,8 @@ function policy.policies()
             ["build.c++.modules.hide_dependencies"] = {description = "Hide dependencies from the commandline when build C++ modules.", default = false, type = "boolean"},
             -- Enable two phase compilation for C++ modules if supported by the compiler
             ["build.c++.modules.two_phases"]      = {description = "Enable two phase compilation if supported.", default = true, type = "boolean"},
+            -- Use --precompile-reduced-bmi for Clang two-phase module compilation if supported
+            ["build.c++.modules.clang.precompile_reduced_bmi"] = {description = "Use --precompile-reduced-bmi for Clang two-phase module compilation if supported.", default = false, type = "boolean"},
             -- Enable std module
             ["build.c++.modules.std"]             = {description = "Enable std modules.", default = true, type = "boolean"},
             -- Enable unreferenced and non-public named module culling

@@ -20,7 +20,7 @@ The goal is to keep the patches small, easy to rebase, easy to test, and behavio
 - Modify the fewest upstream files possible.
 - Prefer the simplest correct implementation and the least code.
 - Do not introduce new subsystems when existing Xmake mechanisms are sufficient.
-- Do not use GitHub Actions or repository workflow files in this fork for building, testing, rebundling, packaging, or release automation; perform project validation locally.
+- The user authorized Windows/Linux packaging and release workflows on 2026-10-20. Use `.github/workflows/patch-release.yml` for official-base rebundling and regression validation on both systems; keep local validation and the pre-commit review gate mandatory. Release automation creates a draft only after both platforms pass.
 
 ## Workflow
 
@@ -43,7 +43,7 @@ For every meaningful milestone, complete this sequence **before starting the nex
 4. Run the relevant local tests against the source-tree implementation first where useful.
 5. Download or refresh the latest official Windows x64 bundled Xmake release executable if the current milestone has not yet been rebundled from that release base.
 6. Rebundle the current source tree with `PATCH/xmake_rebundle.py`.
-7. Run the full patch suite with the newly rebundled `xmake.exe` itself, without `XMAKE_PROGRAM_DIR`.
+7. Run the full patch suite with the newly rebundled `xmake.exe` itself, without `XMAKE_PROGRAM_DIR`. After validation, copy that exact final executable to `PATCH/XMake.exe`, next to `PATCH/README.md`. `PATCH/XMake.exe` must always be the latest validated rebundle and must not exist only under `.validate/`.
 8. After those tests pass, **stop before committing or pushing** and present the milestone to the user for a local review gate. Report exactly which upstream and `PATCH/` files changed, the per-file diff size (added/removed lines, using Git), what each file change does, why each file is necessary, and the total upstream footprint. Call out any file that may still be removable or any logic that may still be simplified.
 9. Do **not** commit or push until the user explicitly confirms that the reviewed local diff is acceptable and authorizes commit/push. A passing test suite is not authorization. Silence, a general request to continue working, or approval of the design is not authorization to publish the current diff.
 10. Before that approval, stay within the same milestone and freely perform additional local simplification/review cycles requested by the user. After each material simplification, rerun the relevant validation and present the updated file/line footprint again. Do not start a different patch milestone while this one is awaiting approval.
@@ -86,7 +86,7 @@ If priorities change and another patch must be implemented before the current un
 
 ## Rebundle tool
 
-`PATCH/xmake_rebundle.py` rebuilds the Lua payload inside a Windows Xmake executable without rebuilding the native core.
+`PATCH/xmake_rebundle.py` rebuilds the Lua payload inside Windows x64 PE and Linux x86_64 ELF Xmake executables without executing the input or rebuilding the native core.
 
 Before rebundling, download the latest available official Windows x64 bundled Xmake executable from an official `xmake-io/xmake` GitHub Release asset. Do not source the base executable from CI artifacts, workflow runs, third-party mirrors, or a locally rebuilt native core. Treat that freshly downloaded official bundled `xmake.exe` as the rebundle input/base; do not assume a previously cached executable is current.
 
@@ -96,7 +96,14 @@ It must:
 - replace the final `.xmz` PE section instead of accumulating sections;
 - derive a SHA-256 prefix from the new XMZ and replace the equal-length native cache token;
 - ensure different Lua payloads use different `.xmake0/<version>` cache directories;
-- support validation entirely through the rebundled executable.
+- support validation entirely through the rebundled executable;
+- after successful validation, publish that exact executable as `PATCH/XMake.exe` beside `PATCH/README.md`, refreshing it after every later rebundle.
+
+`PATCH/package_release.py` downloads a fresh official stable release asset for the current host, verifies its GitHub SHA-256 digest, rebundles the root `xmake/` tree, runs `PATCH/xmake.lua::test-patches` without `XMAKE_PROGRAM_DIR`, and creates a Windows ZIP or Linux tar.gz with SHA-256 and build provenance. Linux validation publishes the exact executable locally as `PATCH/XMake`. All regression coverage stays in `PATCH/xmake.lua`; there is no separate Python test runner. Test subprocesses use an isolated global configuration and a PATH containing only the fresh fixture directory, so host compiler tools cannot satisfy a regression accidentally.
+
+On ELF, reuse a non-property `PT_NOTE` program header for a read-only payload `PT_LOAD` mapping; retain the note sections and the GNU property mapping. Later rebundles replace that trailing payload mapping instead of accumulating segments. On PE, retain the existing final `.xmz` replacement behavior. Native cache tokens are read statically and replaced by equal-length payload SHA-256 prefixes; ambiguous native layouts fail before output is written.
+
+Current synchronization baseline: `upstream/dev` at `8158c5da2ec3d5e4bd6b8a83e376319e948120d0`; official native release base: `v3.1.2`. The existing patch semantics and ten-file upstream Lua footprint are unchanged by this synchronization. The inherited upstream workflows should be disabled in this fork's Actions settings when publishing the reviewed milestone; they build unrelated native platforms and some attach upstream assets to releases. Keep their source files unchanged to reduce future merge conflicts.
 
 # Patch registry
 

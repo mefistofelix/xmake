@@ -152,18 +152,12 @@ function _get_saved_jobdeps_for(jobgraph, buildfilejob)
     return jobdeps
 end
 
+-- @note we cannot cache it, the generator may run in the process which has just built
+-- this project, e.g. `add_rules("plugin.compile_commands.autoupdate")` runs it in its
+-- after_build, so the answer changes while we are running
 function _in_project_generator()
-    local memcache = support.memcache()
-    local in_project_generator = memcache:get("in_project_generator")
-    if in_project_generator == nil then
-        local val = os.getenv("XMAKE_IN_PROJECT_GENERATOR")
-        if val and val ~= "" then
-            in_project_generator = true
-        end
-        in_project_generator = in_project_generator or false
-        memcache:set("in_project_generator", in_project_generator)
-    end
-    return in_project_generator
+    local val = os.getenv("XMAKE_IN_PROJECT_GENERATOR")
+    return val ~= nil and val ~= ""
 end
 
 -- should we build this module or headerunit ?
@@ -194,6 +188,10 @@ function should_build(target, module)
         local dependinfo = {}
         dependinfo.files = {module.sourcefile}
         dependinfo.values = {compinst:program(), compflags}
+        if module.bmifile and not module.headerunit and support.has_two_phase_compilation_support(target) then
+            local bmi_mode = support.has_precompile_reduced_bmi_support(target) and support.get_modulesprecompilereducedbmiflag(target) or "--precompile"
+            table.insert(dependinfo.values, bmi_mode)
+        end
         local objectfile_exists = (module.headerunit or support.is_bmionly(target, module.sourcefile)) and true or os.isfile(module.objectfile)
         dependinfo.lastmtime = (os.isfile(module.bmifile or module.objectfile) and objectfile_exists) and os.mtime(dependfile) or 0
 
@@ -241,6 +239,7 @@ function build_modules_for_jobgraph(target, jobgraph, built_modules)
     profiler.enter(target:fullname(), "c++ modules", "builder", "schedule module bmi build jobs")
     local builder = _builder(target)
     local has_two_phase_compilation_support = support.has_two_phase_compilation_support(target)
+    local has_precompile_reduced_bmi = support.has_precompile_reduced_bmi_support(target)
     local jobdeps = {}
     local buildfilejobs = {}
 
@@ -272,19 +271,24 @@ function build_modules_for_jobgraph(target, jobgraph, built_modules)
             local buildfilejob = _get_module_buildfilejob_for(target, sourcefile, moduletype)
             table.insert(buildfilejobs, buildfilejob)
             jobgraph:add(buildfilejob, function(_, _, jobopt)
-                progress.set_target(jobopt.progress, target)
+                local moduleopt = table.clone(jobopt)
+                progress.set_target(moduleopt.progress, target)
                 -- build bmi if named job
-                jobopt.bmi = module.name
+                moduleopt.bmi = module.name
                 -- build objectfile here if two phase compilation is not supported
-                jobopt.objectfile = not has_two_phase_compilation_support and not bmionly
-                builder.make_module_job(target, module, jobopt)
+                moduleopt.objectfile = not has_two_phase_compilation_support and not bmionly
+                builder.make_module_job(target, module, moduleopt)
             end)
             _merge_jobdeps(jobdeps, _get_jobdeps(target, module, jobgraph, buildfilejob))
 
             -- if two phase compilation supported set jobdeps for objectfile job
             if has_two_phase_compilation_support and not bmionly then
                 local objbuildfilejob = _get_module_buildfilejob_for(target, sourcefile, "objectfile")
-                _merge_jobdeps(jobdeps, {[objbuildfilejob] = {buildfilejob}})
+                if has_precompile_reduced_bmi then
+                    _merge_jobdeps(jobdeps, _get_jobdeps(target, module, jobgraph, objbuildfilejob))
+                else
+                    _merge_jobdeps(jobdeps, {[objbuildfilejob] = {buildfilejob}})
+                end
             end
         end
     end)
@@ -327,10 +331,11 @@ function build_objectfiles_for_jobgraph(target, jobgraph, built_modules)
                 local module = mapper.get(target, sourcefile)
                 local buildfilejob = _get_module_buildfilejob_for(target, sourcefile, "objectfile")
                 jobgraph:add(buildfilejob, function(_, _, jobopt)
-                    progress.set_target(jobopt.progress, target)
-                    jobopt.bmi = false
-                    jobopt.objectfile = true
-                    builder.make_module_job(target, module, jobopt)
+                    local moduleopt = table.clone(jobopt)
+                    progress.set_target(moduleopt.progress, target)
+                    moduleopt.bmi = false
+                    moduleopt.objectfile = true
+                    builder.make_module_job(target, module, moduleopt)
                 end)
             end
         end
@@ -719,6 +724,16 @@ function build_bmis(target, jobgraph, _, opt)
         local built_modules, built_headerunits, _ = scanner.sort_modules_by_dependencies(target, modules, {jobgraph = target:policy("build.jobgraph")})
         local headerunits, stlheaderunits = scanner.sort_headerunits(target, built_headerunits)
         if jobgraph.add_orders then -- jobgraph
+            if support.has_precompile_reduced_bmi_support(target) then
+                -- schedule object jobs in the BMI stage so both jobs can run concurrently
+                -- after their imported BMIs are ready
+                local append_requires_flags = _builder(target).append_requires_flags
+                if append_requires_flags then
+                    append_requires_flags(target, built_modules)
+                end
+                build_objectfiles_for_jobgraph(target, jobgraph, built_modules)
+            end
+
             -- build headerunits
             if stlheaderunits or headerunits then
                 build_headerunits_for_jobgraph(target, jobgraph, stlheaderunits, headerunits)
@@ -758,6 +773,10 @@ function build_objectfiles(target, jobgraph, _, opt)
 
     if target:data("cxx.has_modules") then
         if target:is_moduleonly() and not target:data("cxx.modules.reused") or target:is_phony() then
+            return
+        end
+        if jobgraph.add_orders and support.has_precompile_reduced_bmi_support(target) then
+            -- object jobs have already been scheduled by build_bmis()
             return
         end
         profiler.enter(target:fullname(), "c++ modules", "builder", "objectfiles")

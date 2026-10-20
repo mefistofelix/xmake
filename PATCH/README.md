@@ -2,6 +2,34 @@
 
 This fork adds a small set of callback features that can be used directly from `xmake.lua`.
 
+## Current version and portable packages
+
+Updated to upstream `dev` at `8158c5da2ec3d5e4bd6b8a83e376319e948120d0`, using the official [Xmake v3.1.2](https://github.com/xmake-io/xmake/releases/tag/v3.1.2) native release bundles. The fork's Lua patches are applied on top of the latest default-branch sources.
+
+Build and validate a package locally on Windows x64 or Linux x86_64:
+
+```sh
+uv run --python 3.13 PATCH/package_release.py --upstream-tag v3.1.2
+```
+
+Omit `--upstream-tag` to resolve the latest official stable release at run time. Python 3.11+ with `lz4` can also run the script directly. It always downloads a fresh official base and verifies its SHA-256, without compiling or executing that input. The newly rebundled output runs the regression suite before packaging. Downloads and Python/LZ4 are needed for packaging; the regression suite itself uses no network or host compiler.
+
+The exact validated executable is copied beside this README as `XMake.exe` (Windows) or `XMake` (Linux). Generated binaries and packages are ignored by Git. Packages under `.validate/release/` include the bundled executable, this README, the license and `build-info.json` with official-base and payload hashes, plus an adjacent archive `.sha256` file. Linux users need glibc and `libncurses.so.6`/`libtinfo.so.6` (on Ubuntu: `sudo apt-get install libncurses6`). Extract the tar.gz to preserve executable permissions.
+
+Run all retained regressions directly through the bundle:
+
+```powershell
+.\PATCH\XMake.exe test-patches -P PATCH
+```
+
+```sh
+./PATCH/XMake test-patches -P PATCH
+```
+
+Unset `XMAKE_PROGRAM_DIR` first. Tests create a fresh temporary project and global configuration, restrict child PATH to the fixture directory, and exercise the normal sandbox on both operating systems. Individual tasks remain `test-noop`, `test-before-sources` and `test-add-files`; `test-patches` also proves plain configuration is inert and the first tool request prepares/checks/loads only the used toolchain.
+
+The `Patch bundles (Windows and Linux)` workflow validates both platforms for pushes and pull requests. Manual dispatch accepts `upstream_tag` (default `latest`). A `patched-v...` tag or a manual `release_tag` creates a **draft** release after both jobs pass, containing both archives and checksums. The upstream version is resolved once per run, so the matrix uses the same release. See [release notes](RELEASE.md). Keep inherited upstream workflows disabled in the fork's Actions settings: they rebuild unrelated native platforms and use upstream publishing conventions.
+
 The callbacks run in the normal Xmake sandbox, so normal APIs such as `os.runv()`, `os.vrunv()`, `os.execv()`, `os.iorunv()`, `io.*`, `path.*`, environment access, and imported modules are available.
 
 ## `on_toolchain_prepare`

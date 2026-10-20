@@ -3,7 +3,7 @@
 # dependencies = ["lz4>=4.3"]
 # ///
 
-# Xmake bundle extract/rebundle tool (Windows x64)
+# Xmake bundle extract/rebundle tool (Windows x64 and Linux x86_64)
 #
 # Extract the Lua/program tree directly from the XMZ embedded in the EXE:
 #     uv run xmake_rebundle.py extract xmake-bundle.exe bundle-root
@@ -12,27 +12,25 @@
 #     uv run xmake_rebundle.py rebundle xmake-bundle.exe bundle-root xmake-bundle-patched.exe
 #
 # `extract` does not run Xmake and does not use %TEMP%: it finds the active embedded
-# LZ4/XMZ frame in the PE, decompresses it, and writes the XMZ records directly.
+# LZ4/XMZ frame in the executable, decompresses it, and writes the XMZ records directly.
 #
-# `rebundle` asks the input Xmake bundle itself to create a fresh XMZ from bundle-root
-# using its official `xmake l cli.archive` command. It replaces an existing dedicated
+# `rebundle` creates a deterministic LZ4/XMZ directly, without executing the input.
+# It replaces an existing dedicated
 # `.xmz` section in place, resizing it as needed; an upstream bundle without one gets a
 # new read-only `.xmz` section once. Xmake's RIP-relative _binary_xmake_xmz_start/end
 # references are repointed as needed. The new XMZ may be smaller or larger than the old one.
-# It also queries `xmake --version`, finds that native cache-token string in the PE, and
+# Linux uses a dedicated read-only PT_LOAD mapping, reusing a non-property PT_NOTE
+# header on the first rebundle and replacing the trailing payload on later runs.
+# It also finds the native cache-token string in the executable and
 # replaces it in place with an equally long SHA-256 prefix of the new XMZ. This gives each
 # rebundled XMZ its own `.xmake0/<version>` extraction directory without changing C code.
 #
 # No compiler, linker, object files, source tree, or external PE tool is required.
 
 import hashlib
-import os
 import re
-import shutil
 import struct
-import subprocess
 import sys
-import tempfile
 from pathlib import Path, PurePosixPath
 
 import lz4.frame
@@ -93,6 +91,7 @@ def parse_pe(data):
         })
 
     return {
+        "format": "pe",
         "coff": coff,
         "optional": optional,
         "section_count": section_count,
@@ -102,6 +101,38 @@ def parse_pe(data):
         "size_of_headers": size_of_headers,
         "sections": sections,
     }
+
+
+def parse_elf(data):
+    if data[:6] != b"\x7fELF\x02\x01" or u16(data, 18) != 62:
+        raise ValueError("expected a little-endian Linux x86_64 ELF")
+    phoff = struct.unpack_from("<Q", data, 32)[0]
+    phsize, phcount = struct.unpack_from("<HH", data, 54)
+    if phsize != 56:
+        raise ValueError("unsupported ELF program-header size")
+    sections, notes = [], []
+    property_ranges = []
+    for i in range(phcount):
+        header = phoff + i * phsize
+        kind, flags, offset, vaddr, _, filesz, memsz, alignment = struct.unpack_from("<IIQQQQQQ", data, header)
+        if kind == 1:  # PT_LOAD: these are the ranges actually mapped by the loader
+            sections.append({
+                "header": header, "raw_offset": offset, "raw_size": filesz,
+                "virtual_address": vaddr, "virtual_size": memsz,
+                "characteristics": 0x20000000 if flags & 1 else 0,
+                "alignment": alignment,
+            })
+        elif kind == 4:
+            notes.append((header, offset, filesz))
+        elif kind == 0x6474e553:  # preserve the GNU property note and its loader metadata
+            property_ranges.append((offset, offset + filesz))
+    spare = next((h for h, off, size in notes
+                  if not any(off < end and off + size > start for start, end in property_ranges)), None)
+    return {"format": "elf", "sections": sections, "spare_header": spare}
+
+
+def parse_executable(data):
+    return parse_elf(data) if data[:4] == b"\x7fELF" else parse_pe(data)
 
 
 def file_offset_to_rva(pe, file_offset):
@@ -229,7 +260,7 @@ def safe_output_path(root, name):
 
 def extract_bundle(exe_path, output_dir):
     data = Path(exe_path).read_bytes()
-    pe = parse_pe(data)
+    pe = parse_executable(data)
     xmz = find_active_xmz(data, pe)
     root = Path(output_dir)
 
@@ -258,88 +289,50 @@ def patch_disp32(data, disp_offset, instruction_rva, target_rva):
     struct.pack_into("<i", data, disp_offset, disp)
 
 
-def get_xmake_version(exe_path):
-    exe = Path(exe_path).resolve()
-    with tempfile.TemporaryDirectory(prefix="xmake-version-") as tmp:
-        env = os.environ.copy()
-        env["TEMP"] = tmp
-        env["TMP"] = tmp
-        result = subprocess.run(
-            [str(exe), "--version"],
-            cwd=tmp,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    if result.returncode != 0:
-        raise ValueError(f"cannot query Xmake version: {result.stderr.strip() or result.stdout.strip()}")
-
-    match = re.search(r"xmake v([^,\r\n]+),", result.stdout)
-    if not match:
-        raise ValueError("cannot parse Xmake --version output")
-    return match.group(1).strip()
-
-
-def patch_cache_version(data, version, new_xmz):
-    _, plus, suffix = version.partition("+")
-    branch, dot, token = suffix.rpartition(".")
-    if not plus or not dot or not branch or not token:
-        raise ValueError(f"unsupported Xmake version format for cache patching: {version!r}")
-
-    try:
-        old = token.encode("ascii")
-    except UnicodeEncodeError as e:
-        raise ValueError(f"non-ASCII Xmake cache token in version: {version!r}") from e
-    if len(old) < 4:
-        raise ValueError(f"Xmake cache token is too short to patch safely: {token!r}")
-
-    needle = old + b"\0"
-    offsets = []
-    pos = 0
-    while True:
-        pos = data.find(needle, pos)
-        if pos < 0:
-            break
-        offsets.append(pos)
-        pos += 1
-    if len(offsets) != 1:
-        raise ValueError(
-            f"expected exactly one native cache token {token!r} from Xmake --version, found {len(offsets)}"
-        )
-
+def patch_cache_version(data, pe, old_xmz, new_xmz):
+    # Official bundles store the abbreviated Git commit as a separate C string.
+    # Restrict candidates to mapped native data, excluding the compressed payload,
+    # and require a code reference. Fail closed if a future native layout differs.
+    candidates = []
+    build_dates = set(re.findall(rb"xmake_v\d+_\d+_\d+_(\d+)_", data))
+    for section in pe["sections"]:
+        start = section["raw_offset"]
+        end = start + section["raw_size"]
+        for match in re.finditer(rb"(?<![ -~])[0-9a-f]{7,12}\x00", data[start:end]):
+            offset = start + match.start()
+            token = match.group()[:-1]
+            if old_xmz["offset"] <= offset < old_xmz["offset"] + old_xmz["size"]:
+                continue
+            if token in build_dates or token.startswith(b"0123456789"):
+                continue
+            if find_rip_lea_refs(data, pe, file_offset_to_rva(pe, offset)):
+                candidates.append((offset, token))
+    if len(candidates) != 1:
+        raise ValueError(f"expected one referenced native cache token, found {candidates!r}")
+    offset, old = candidates[0]
     replacement = hashlib.sha256(new_xmz).hexdigest()[:len(old)].encode("ascii")
-    data[offsets[0]:offsets[0] + len(old)] = replacement
-    return token, replacement.decode("ascii"), branch
+    data[offset:offset + len(old)] = replacement
+    return old.decode("ascii"), replacement.decode("ascii")
 
 
-def build_xmz_with_xmake(exe_path, source_dir, output_xmz):
-    exe = Path(exe_path).resolve()
+def build_xmz(source_dir):
     source = Path(source_dir).resolve()
-    output = Path(output_xmz).resolve()
-
     if not source.is_dir():
         raise ValueError(f"bundle root not found: {source}")
-
-    with tempfile.TemporaryDirectory(prefix="xmake-rebundle-") as tmp:
-        env = os.environ.copy()
-        env["TEMP"] = tmp
-        env["TMP"] = tmp
-        subprocess.run([
-            str(exe), "l", "cli.archive", "-r",
-            "-w", str(source),
-            "-o", str(output),
-            str(source),
-        ], check=True, env=env)
+    raw = bytearray()
+    for path in sorted(source.rglob("*"), key=lambda p: p.relative_to(source).as_posix()):
+        if path.is_file():
+            name = path.relative_to(source).as_posix().encode("utf-8")
+            content = path.read_bytes()
+            raw.extend(struct.pack(">H", len(name)) + name + struct.pack(">I", len(content)) + content)
+    parse_xmz_records(raw)
+    return lz4.frame.compress(raw, compression_level=9)
 
 
-def append_and_repoint(exe_path, new_xmz_path, output_path, version):
+def append_and_repoint(exe_path, new_xmz, output_path):
     data = bytearray(Path(exe_path).read_bytes())
     pe = parse_pe(data)
     old = find_active_xmz(data, pe)
-    new_xmz = Path(new_xmz_path).read_bytes()
 
     old_section = next(
         section for section in pe["sections"]
@@ -369,11 +362,11 @@ def append_and_repoint(exe_path, new_xmz_path, output_path, version):
         for ref in old["end_refs"]:
             patch_disp32(data, *ref, old["start_rva"] + len(new_xmz))
 
-        old_token, new_token, branch = patch_cache_version(data, version, new_xmz)
+        old_token, new_token = patch_cache_version(data, pe, old, new_xmz)
         Path(output_path).write_bytes(data)
         print(f"old XMZ: {old['size']:,} bytes @ RVA 0x{old['start_rva']:x} ({len(old['start_refs'])} start ref(s), {len(old['end_refs'])} end ref(s))")
         print(f"new XMZ: {len(new_xmz):,} bytes @ RVA 0x{old['start_rva']:x} (replaced .xmz section)")
-        print(f"cache version: {branch}.{old_token} -> {branch}.{new_token}")
+        print(f"cache token: {old_token} -> {new_token}")
         print(f"wrote: {output_path}")
         return
 
@@ -419,28 +412,58 @@ def append_and_repoint(exe_path, new_xmz_path, output_path, version):
     for ref in old["end_refs"]:
         patch_disp32(data, *ref, new_rva + len(new_xmz))
 
-    old_token, new_token, branch = patch_cache_version(data, version, new_xmz)
+    old_token, new_token = patch_cache_version(data, pe, old, new_xmz)
     Path(output_path).write_bytes(data)
     print(f"old XMZ: {old['size']:,} bytes @ RVA 0x{old['start_rva']:x} ({len(old['start_refs'])} start ref(s), {len(old['end_refs'])} end ref(s))")
     print(f"new XMZ: {len(new_xmz):,} bytes @ RVA 0x{new_rva:x}")
-    print(f"cache version: {branch}.{old_token} -> {branch}.{new_token}")
+    print(f"cache token: {old_token} -> {new_token}")
+    print(f"wrote: {output_path}")
+
+
+def rebundle_elf(exe_path, new_xmz, output_path):
+    data = bytearray(Path(exe_path).read_bytes())
+    elf = parse_elf(data)
+    old = find_active_xmz(data, elf)
+    section = next((s for s in elf["sections"] if s["raw_offset"] == old["offset"]
+                    and s["raw_size"] == old["size"] and s["raw_offset"] + s["raw_size"] == len(data)), None)
+    old_token, new_token = patch_cache_version(data, elf, old, new_xmz)
+    if section:
+        offset, vaddr, header = section["raw_offset"], section["virtual_address"], section["header"]
+        del data[offset:]
+    else:
+        header = elf["spare_header"]
+        if header is None:
+            raise ValueError("no spare ELF note header for the bundle mapping")
+        offset = align(len(data), 0x1000)
+        vaddr = align(max(s["virtual_address"] + s["virtual_size"] for s in elf["sections"]), 0x1000)
+        data.extend(b"\0" * (offset - len(data)))
+    data.extend(new_xmz)
+    struct.pack_into("<IIQQQQQQ", data, header, 1, 4, offset, vaddr, vaddr, len(new_xmz), len(new_xmz), 0x1000)
+    for ref in old["start_refs"]:
+        patch_disp32(data, *ref, vaddr)
+    for ref in old["end_refs"]:
+        patch_disp32(data, *ref, vaddr + len(new_xmz))
+    Path(output_path).write_bytes(data)
+    Path(output_path).chmod(0o755)
+    print(f"new XMZ: {len(new_xmz):,} bytes @ ELF address 0x{vaddr:x}")
+    print(f"cache token: {old_token} -> {new_token}")
     print(f"wrote: {output_path}")
 
 
 def rebundle(exe_path, source_dir, output_path):
-    version = get_xmake_version(exe_path)
-    with tempfile.TemporaryDirectory(prefix="xmake-rebundle-xmz-") as tmp:
-        xmz = Path(tmp) / "xmake.xmz"
-        build_xmz_with_xmake(exe_path, source_dir, xmz)
-        append_and_repoint(exe_path, xmz, output_path, version)
+    new_xmz = build_xmz(source_dir)
+    if Path(exe_path).read_bytes()[:4] == b"\x7fELF":
+        rebundle_elf(exe_path, new_xmz, output_path)
+    else:
+        append_and_repoint(exe_path, new_xmz, output_path)
 
 
 def usage():
     name = Path(sys.argv[0]).name
     return (
         f"usage:\n"
-        f"  uv run {name} extract  <bundle.exe> <output-dir>\n"
-        f"  uv run {name} rebundle <bundle.exe> <bundle-root> <output.exe>"
+        f"  uv run {name} extract  <bundle> <output-dir>\n"
+        f"  uv run {name} rebundle <bundle> <bundle-root> <output>"
     )
 
 
